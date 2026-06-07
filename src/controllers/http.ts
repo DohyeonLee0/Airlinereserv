@@ -18,6 +18,14 @@ export function conflict(message: string, errorType = "DOUBLE_BOOKING") {
   return NextResponse.json({ success: false, errorType, message }, { status: 409 });
 }
 
+export function unauthorized(message = "Authentication required") {
+  return NextResponse.json({ success: false, errorType: "UNAUTHORIZED", message }, { status: 401 });
+}
+
+export function forbidden(message = "Access denied") {
+  return NextResponse.json({ success: false, errorType: "FORBIDDEN", message }, { status: 403 });
+}
+
 export function serverError(error: unknown) {
   const message = error instanceof Error ? error.message : "Unexpected server error";
   return NextResponse.json({ success: false, errorType: "SERVER_ERROR", message }, { status: 500 });
