@@ -1,8 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
-import { useLocale } from "@/lib/useLocale";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ArrowLeftRight,
+  ChevronRight,
+  Globe2,
+  Plane,
+  ShieldCheck,
+  Sparkles,
+  Tag,
+  Zap
+} from "lucide-react";
+import FlightResultCard, { priceOf, routeLabel, seatHref } from "@/app/components/home/FlightResultCard";
+import FlightSearchWidget from "@/app/components/home/FlightSearchWidget";
+import PopularRouteCard from "@/app/components/home/PopularRouteCard";
+import Button from "@/app/components/ui/Button";
+import { cn } from "@/lib/cn";
 
 type RouteRow = {
   route_type?: "DIRECT" | "ONE_STOP";
@@ -32,98 +46,69 @@ type SearchTab = "basic" | "promotions" | "recommend";
 type ResultFilter = "direct" | "all" | "connections";
 type SeatClass = "Economy" | "Business" | "First";
 
-const copy = {
-  ko: {
-    welcome: "환영합니다",
-    title: "항공권 검색",
-    recommended: "강력 추천 Top 5",
-    score: "점",
-    tabs: {
-      basic: "일반 검색",
-      promotions: "프로모션 코드",
-      recommend: "추천 경로 검색"
-    },
-    dep: "출발 공항",
-    arr: "도착 공항",
-    date: "출발일",
-    seatClass: "좌석 등급",
-    maxPrice: "최대 가격",
-    promoCode: "프로모션 코드",
-    promoHint: "예: SUMMER10, BUSINESS15, ICNUSA20, ASIA12",
-    search: "검색",
-    searching: "검색 중",
-    seatsLeft: "잔여 좌석",
-    chooseSeat: "좌석 선택",
-    noResults: "검색 결과가 없습니다. ICN → JFK, 2026-06-01, 이코노미 조건으로 먼저 확인해 보세요.",
-    promoNoResults: "해당 프로모션 코드가 적용되는 항공편이 없습니다.",
-    error: "검색 중 오류가 발생했습니다.",
-    discount: "할인",
-    original: "정가",
-    filters: {
-      direct: "직항만",
-      all: "경유 포함",
-      connections: "경유만"
-    },
-    classes: {
-      Economy: "이코노미",
-      Business: "비즈니스",
-      First: "퍼스트"
-    }
-  },
-  en: {
-    welcome: "Welcome",
-    title: "Flight Search",
-    recommended: "Top 5 Recommended Routes",
-    score: "pts",
-    tabs: {
-      basic: "Basic Search",
-      promotions: "Promotion Code",
-      recommend: "Recommended Routes"
-    },
-    dep: "Departure Airport",
-    arr: "Arrival Airport",
-    date: "Flight Date",
-    seatClass: "Seat Class",
-    maxPrice: "Max Price",
-    promoCode: "Promotion Code",
-    promoHint: "Try SUMMER10, BUSINESS15, ICNUSA20, ASIA12",
-    search: "Search",
-    searching: "Searching",
-    seatsLeft: "Seats left",
-    chooseSeat: "Choose Seat",
-    noResults: "No flights found. Try ICN → JFK, 2026-06-01, Economy first.",
-    promoNoResults: "No flights match this promotion code.",
-    error: "An error occurred while searching.",
-    discount: "Discount",
-    original: "Original",
-    filters: {
-      direct: "Direct Only",
-      all: "Include Connections",
-      connections: "Connections Only"
-    },
-    classes: {
-      Economy: "Economy",
-      Business: "Business",
-      First: "First"
-    }
-  }
+type ExploreDeal = {
+  arr: string;
+  city: string;
+  country: string;
+  topRoute: RouteRow | null;
+  loading: boolean;
 };
 
-function priceOf(row: RouteRow) {
-  return row.final_lowest_price ?? row.total_lowest_price ?? row.lowest_price ?? row.lowest_available_price ?? 0;
-}
+const POPULAR_FROM_ICN = [
+  { arr: "JFK", city: "New York", country: "United States" },
+  { arr: "LAX", city: "Los Angeles", country: "United States" },
+  { arr: "NRT", city: "Tokyo", country: "Japan" },
+  { arr: "SIN", city: "Singapore", country: "Singapore" },
+  { arr: "CDG", city: "Paris", country: "France" },
+  { arr: "BKK", city: "Bangkok", country: "Thailand" }
+] as const;
 
-function flightIdOf(row: RouteRow) {
-  return row.first_flight_id ?? row.flight_id ?? "";
-}
+const QUICK_PROMOS = ["SUMMER10", "BUSINESS15", "ICNUSA20", "ASIA12"];
 
-function seatHref(row: RouteRow) {
-  const first = row.first_flight_id ?? row.flight_id;
-  if (row.route_type === "ONE_STOP" && first && row.second_flight_id) {
-    return `/seats?flight_ids=${first},${row.second_flight_id}`;
+const HERO_STATS = [
+  { label: "Global routes", value: "120+" },
+  { label: "Partner airlines", value: "8" },
+  { label: "Smart scoring", value: "Live" }
+] as const;
+
+const FEATURES = [
+  {
+    icon: Globe2,
+    title: "Global routes",
+    description: "Search direct and one-stop paths from ICN to major hubs worldwide."
+  },
+  {
+    icon: Tag,
+    title: "Live promo codes",
+    description: "Apply codes like SUMMER10 and see discounted fares applied instantly."
+  },
+  {
+    icon: Sparkles,
+    title: "Smart scoring",
+    description: "Price, seat availability, and connection quality ranked in real time."
+  },
+  {
+    icon: Zap,
+    title: "Real-time availability",
+    description: "Seat counts and lowest fares pulled straight from the database."
+  },
+  {
+    icon: ShieldCheck,
+    title: "Secure booking",
+    description: "Authenticated sessions, role-based access, and auditable reservation logs."
+  },
+  {
+    icon: ArrowLeftRight,
+    title: "Direct & connecting",
+    description: "Compare non-stop flights and one-stop connections in a single search."
   }
-  return `/seats?flight_id=${first ?? ""}`;
-}
+] as const;
+
+const STEPS = [
+  { step: "01", title: "Search your route", desc: "Enter airports, date, and cabin — filter by price or promo code." },
+  { step: "02", title: "Compare smart picks", desc: "Our scoring engine ranks routes by value, seats, and connection quality." },
+  { step: "03", title: "Choose your seat", desc: "Select seats and complete your booking in a few clicks." }
+] as const;
 
 function filterRoutes(routes: RouteRow[], filter: ResultFilter, isPromotionTab: boolean) {
   if (isPromotionTab) return routes;
@@ -132,14 +117,17 @@ function filterRoutes(routes: RouteRow[], filter: ResultFilter, isPromotionTab: 
   return routes;
 }
 
+function flightIdOf(row: RouteRow) {
+  return row.first_flight_id ?? row.flight_id ?? "";
+}
+
 export default function HomePage() {
-  const { locale } = useLocale();
-  const t = copy[locale];
+  const resultsRef = useRef<HTMLElement>(null);
   const [tab, setTab] = useState<SearchTab>("basic");
   const [form, setForm] = useState({
     dep_airport: "ICN",
     arr_airport: "JFK",
-    flight_date: "2026-06-01",
+    flight_date: "2026-06-10",
     class_name: "Economy" as SeatClass,
     max_price: "",
     promo_code: "SUMMER10"
@@ -147,48 +135,88 @@ export default function HomePage() {
   const [routes, setRoutes] = useState<RouteRow[]>([]);
   const [resultFilter, setResultFilter] = useState<ResultFilter>("all");
   const [recommended, setRecommended] = useState<RouteRow[]>([]);
+  const [exploreDeals, setExploreDeals] = useState<ExploreDeal[]>(
+    POPULAR_FROM_ICN.map((d) => ({ ...d, topRoute: null, loading: true }))
+  );
   const [loading, setLoading] = useState(false);
-  const [profile, setProfile] = useState("Customer Demo");
   const [error, setError] = useState("");
+  const [hasSearched, setHasSearched] = useState(false);
+  const [sessionUser, setSessionUser] = useState<{ role: string } | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const visibleRoutes = filterRoutes(routes, resultFilter, tab === "promotions");
 
   useEffect(() => {
-    fetch("/api/customers/profiles")
+    fetch("/api/auth/me")
       .then((res) => res.json())
-      .then((json) => setProfile(json.data?.customers?.[0]?.full_name ?? "Customer Demo"))
-      .catch(() => setProfile("Customer Demo"));
+      .then((json) => {
+        if (json.success && json.data?.user) {
+          setSessionUser(json.data.user);
+        } else {
+          setSessionUser(null);
+        }
+      })
+      .catch(() => setSessionUser(null))
+      .finally(() => setAuthReady(true));
+  }, []);
+
+  const loadRecommended = useCallback(async (dep: string, arr: string, date: string, className: string) => {
+    const params = new URLSearchParams({
+      dep_airport: dep,
+      arr_airport: arr,
+      flight_date: date,
+      class_name: className
+    });
+    const response = await fetch(`/api/flights/recommend?${params}`);
+    const json = await response.json();
+    return (json.data?.routes ?? []) as RouteRow[];
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams({
-      dep_airport: form.dep_airport,
-      arr_airport: form.arr_airport,
-      flight_date: form.flight_date,
-      class_name: form.class_name
-    });
-    fetch(`/api/flights/recommend?${params}`)
-      .then((res) => res.json())
-      .then((json) => setRecommended(json.data?.routes ?? []))
+    loadRecommended(form.dep_airport, form.arr_airport, form.flight_date, form.class_name)
+      .then((rows) => setRecommended(rows))
       .catch(() => setRecommended([]));
-  }, [form.dep_airport, form.arr_airport, form.flight_date, form.class_name]);
+  }, [form.dep_airport, form.arr_airport, form.flight_date, form.class_name, loadRecommended]);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  useEffect(() => {
+    let cancelled = false;
+    async function loadExploreDeals() {
+      const updates = await Promise.all(
+        POPULAR_FROM_ICN.map(async (dest) => {
+          try {
+            const rows = await loadRecommended("ICN", dest.arr, form.flight_date, form.class_name);
+            return { ...dest, topRoute: rows[0] ?? null, loading: false };
+          } catch {
+            return { ...dest, topRoute: null, loading: false };
+          }
+        })
+      );
+      if (!cancelled) setExploreDeals(updates);
+    }
+    loadExploreDeals();
+    return () => {
+      cancelled = true;
+    };
+  }, [form.flight_date, form.class_name, loadRecommended]);
+
+  async function runSearch(nextTab = tab, scrollToResults = true, overrides?: Partial<typeof form>) {
+    const activeForm = { ...form, ...overrides };
     setLoading(true);
     setError("");
+    setHasSearched(true);
+
     const params = new URLSearchParams({
-      dep_airport: form.dep_airport,
-      arr_airport: form.arr_airport,
-      flight_date: form.flight_date,
-      class_name: form.class_name
+      dep_airport: activeForm.dep_airport,
+      arr_airport: activeForm.arr_airport,
+      flight_date: activeForm.flight_date,
+      class_name: activeForm.class_name
     });
-    if (form.max_price) params.set("max_price", form.max_price);
-    if (tab === "promotions" && form.promo_code) params.set("promo_code", form.promo_code.trim().toUpperCase());
+    if (activeForm.max_price) params.set("max_price", activeForm.max_price);
+    if (nextTab === "promotions" && activeForm.promo_code) params.set("promo_code", activeForm.promo_code.trim().toUpperCase());
 
     const endpoint =
-      tab === "basic"
+      nextTab === "basic"
         ? "/api/flights/search/connecting"
-        : tab === "promotions"
+        : nextTab === "promotions"
           ? "/api/flights/search/promotions"
           : "/api/flights/recommend";
 
@@ -196,208 +224,403 @@ export default function HomePage() {
       const response = await fetch(`${endpoint}?${params}`);
       const json = await response.json();
       if (!response.ok || !json.success) {
-        setError(json.message ?? t.error);
+        setError(json.message ?? "An error occurred while searching.");
         setRoutes([]);
         return;
       }
       setRoutes(json.data?.routes ?? []);
       setResultFilter("all");
+      if (scrollToResults) {
+        setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+      }
     } catch {
-      setError(t.error);
+      setError("An error occurred while searching.");
       setRoutes([]);
     } finally {
       setLoading(false);
     }
   }
 
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    await runSearch();
+  }
+
+  function swapAirports() {
+    setForm((prev) => ({ ...prev, dep_airport: prev.arr_airport, arr_airport: prev.dep_airport }));
+  }
+
+  function pickDestination(arr: string) {
+    setForm((prev) => ({ ...prev, arr_airport: arr }));
+    setTab("basic");
+    void runSearch("basic", true, { arr_airport: arr });
+  }
+
+  function applyPromo(code: string) {
+    setForm((prev) => ({ ...prev, promo_code: code }));
+    setTab("promotions");
+    void runSearch("promotions", true, { promo_code: code });
+  }
+
   return (
-    <div className="space-y-8">
-      <section className="grid gap-6 lg:grid-cols-[1fr_360px]">
-        <div>
-          <p className="text-sm font-medium text-slate-500">
-            {t.welcome}, {profile}
-          </p>
-          <h1 className="mt-2 text-3xl font-semibold text-navy">{t.title}</h1>
+    <div className="bg-white">
+      <div className="border-b border-zinc-100 bg-zinc-50/80">
+        <div className="mx-auto flex max-w-[1120px] items-center justify-center gap-2 px-5 py-3 sm:px-8">
+          <span className="rounded-full bg-cerulean-500/10 px-2.5 py-0.5 text-xs font-semibold text-cerulean-800">Demo</span>
+          <p className="text-sm text-zinc-600">CSE305 airline reservation — search, score, and book in one place</p>
+          <ChevronRight className="size-4 text-zinc-400" />
         </div>
-        <div className="rounded border border-slate-200 bg-white p-4">
-          <p className="text-sm font-semibold text-navy">{t.recommended}</p>
-          <div className="mt-3 space-y-2">
-            {recommended.slice(0, 5).map((row, index) => (
-              <div key={`${row.first_flight_id}-${index}`} className="flex items-center justify-between border-t border-slate-100 pt-2 text-sm">
-                <span>
-                  {row.dep_airport} → {row.connection_airport ? `${row.connection_airport} → ` : ""}
-                  {row.arr_airport}
-                </span>
-                <span className="font-semibold text-navy">
-                  {row.recommendation_score ?? "-"} {t.score}
-                </span>
+      </div>
+
+      <section id="hero" className="relative overflow-hidden px-5 pb-16 pt-12 sm:px-8 sm:pb-20 sm:pt-16">
+        <div className="pointer-events-none absolute -right-32 -top-32 size-[480px] rounded-full bg-gradient-to-br from-cerulean-400/20 via-sky-blue-light/30 to-transparent blur-3xl" />
+        <div className="pointer-events-none absolute -left-20 top-1/2 size-[320px] rounded-full bg-gradient-to-tr from-yale-blue-2-400/10 to-transparent blur-3xl" />
+
+        <div className="relative mx-auto max-w-[1120px]">
+          <h1 className="max-w-[720px] text-[40px] font-bold leading-[1.1] tracking-tight text-zinc-900 sm:text-[56px] lg:text-[64px]">
+            CSE305 Air makes
+            <br />
+            <span className="bg-gradient-to-r from-deep-space-blue via-cerulean-700 to-yale-blue-2-600 bg-clip-text text-transparent">
+              flight search simple
+            </span>
+          </h1>
+          <p className="mt-6 max-w-[540px] text-lg leading-relaxed text-zinc-500 sm:text-xl">
+            <span className="font-medium text-zinc-800">Direct and connecting routes.</span> Compare fares, apply promo
+            codes, and let our scoring engine surface the smartest options.
+          </p>
+
+          <div className="mt-10 grid gap-4 sm:grid-cols-3">
+            {HERO_STATS.map((stat) => (
+              <div key={stat.label} className="rounded-2xl border border-zinc-100 bg-zinc-50/80 px-5 py-4">
+                <p className="text-2xl font-bold tracking-tight text-zinc-900">{stat.value}</p>
+                <p className="mt-0.5 text-sm text-zinc-500">{stat.label}</p>
               </div>
             ))}
           </div>
+
+          <div className="mt-10">
+            <FlightSearchWidget
+              tab={tab}
+              form={form}
+              loading={loading}
+              quickPromos={QUICK_PROMOS}
+              onTabChange={setTab}
+              onFormChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+              onSubmit={submit}
+              onSwapAirports={swapAirports}
+              onApplyPromo={applyPromo}
+            />
+          </div>
+
+          <p className="mt-4 text-sm text-zinc-400">MariaDB stored procedures · Live seat inventory · Smart recommendations</p>
         </div>
       </section>
 
-      <form onSubmit={submit} className="rounded border border-slate-200 bg-white p-5">
-        <div className="mb-5 flex flex-wrap gap-2 border-b border-slate-200 pb-4">
-          {(Object.keys(t.tabs) as SearchTab[]).map((key) => (
-            <button
-              type="button"
-              key={key}
-              onClick={() => setTab(key)}
-              className={`rounded border px-4 py-2 text-sm font-semibold ${
-                tab === key ? "border-navy bg-navy text-white" : "border-slate-200 bg-white text-slate-700"
-              }`}
-            >
-              {t.tabs[key]}
-            </button>
-          ))}
-        </div>
-        <div className="grid gap-4 md:grid-cols-6">
-          <label className="text-sm font-medium text-slate-700">
-            {t.dep}
-            <input
-              value={form.dep_airport}
-              onChange={(event) => setForm((prev) => ({ ...prev, dep_airport: event.target.value.toUpperCase() }))}
-              className="mt-2 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:border-navy"
-            />
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            {t.arr}
-            <input
-              value={form.arr_airport}
-              onChange={(event) => setForm((prev) => ({ ...prev, arr_airport: event.target.value.toUpperCase() }))}
-              className="mt-2 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:border-navy"
-            />
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            {t.date}
-            <input
-              type="date"
-              value={form.flight_date}
-              onChange={(event) => setForm((prev) => ({ ...prev, flight_date: event.target.value }))}
-              className="mt-2 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:border-navy"
-            />
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            {t.seatClass}
-            <select
-              value={form.class_name}
-              onChange={(event) => setForm((prev) => ({ ...prev, class_name: event.target.value as SeatClass }))}
-              className="mt-2 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:border-navy"
-            >
-              {(["Economy", "Business", "First"] as SeatClass[]).map((seatClass) => (
-                <option key={seatClass} value={seatClass}>
-                  {t.classes[seatClass]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            {t.maxPrice}
-            <input
-              type="number"
-              value={form.max_price}
-              onChange={(event) => setForm((prev) => ({ ...prev, max_price: event.target.value }))}
-              className="mt-2 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:border-navy"
-            />
-          </label>
-          {tab === "promotions" && (
-            <label className="text-sm font-medium text-slate-700">
-              {t.promoCode}
-              <input
-                value={form.promo_code}
-                onChange={(event) => setForm((prev) => ({ ...prev, promo_code: event.target.value.toUpperCase() }))}
-                placeholder="SUMMER10"
-                className="mt-2 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:border-navy"
-              />
-            </label>
-          )}
-        </div>
-        {tab === "promotions" && <p className="mt-3 text-xs text-slate-500">{t.promoHint}</p>}
-        <button className="mt-5 rounded bg-navy px-5 py-2.5 text-sm font-semibold text-white" disabled={loading}>
-          {loading ? t.searching : t.search}
-        </button>
-      </form>
-
-      {routes.length > 0 && tab !== "promotions" && (
-        <div className="flex flex-wrap gap-2">
-          {(Object.keys(t.filters) as ResultFilter[]).map((key) => {
-            const count =
-              key === "direct"
-                ? routes.filter((row) => row.route_type !== "ONE_STOP").length
-                : key === "connections"
-                  ? routes.filter((row) => row.route_type === "ONE_STOP").length
-                  : routes.length;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setResultFilter(key)}
-                className={`rounded border px-4 py-2 text-sm font-semibold ${
-                  resultFilter === key ? "border-navy bg-navy text-white" : "border-slate-200 bg-white text-slate-700"
-                }`}
-              >
-                {t.filters[key]} ({count})
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      <section className="grid gap-4 md:grid-cols-2">
-        {error && <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700 md:col-span-2">{error}</div>}
-        {!error && !loading && routes.length === 0 && (
-          <div className="rounded border border-slate-200 bg-white p-5 text-sm text-slate-600 md:col-span-2">
-            {tab === "promotions" ? t.promoNoResults : t.noResults}
-          </div>
-        )}
-        {!error && !loading && routes.length > 0 && visibleRoutes.length === 0 && (
-          <div className="rounded border border-slate-200 bg-white p-5 text-sm text-slate-600 md:col-span-2">
-            {t.noResults}
-          </div>
-        )}
-        {visibleRoutes.map((row, index) => (
-          <article key={`${flightIdOf(row)}-${index}`} className="rounded border border-slate-200 bg-white p-5">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <span className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-600">
-                  {row.applied_promo_code ?? (row.route_type === "ONE_STOP" ? "ONE STOP" : "DIRECT")}
-                </span>
-                <h2 className="mt-3 text-xl font-semibold text-navy">
-                  {row.dep_airport} → {row.connection_airport ? `${row.connection_airport} → ` : ""}
-                  {row.arr_airport}
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  {row.first_flight_number ?? row.flight_number ?? "Flight"} {row.second_flight_number ? `+ ${row.second_flight_number}` : ""}
-                </p>
-                {row.promo_description && <p className="mt-2 text-sm text-emerald-700">{row.promo_description}</p>}
-              </div>
-              <div className="text-right">
-                {row.original_lowest_price && row.final_lowest_price && (
-                  <p className="text-xs text-slate-400 line-through">
-                    {t.original}: ${row.original_lowest_price.toLocaleString()}
-                  </p>
-                )}
-                <p className="text-lg font-semibold text-navy">${priceOf(row).toLocaleString()}</p>
-                {row.discount_percent ? (
-                  <p className="text-xs font-semibold text-emerald-700">
-                    {t.discount} {row.discount_percent}%
-                  </p>
-                ) : null}
-                <p className="text-xs text-slate-500">
-                  {t.seatsLeft}: {row.available_seats}
-                </p>
+      {!hasSearched && (
+        <>
+          <section id="destinations" className="border-t border-zinc-100 bg-zinc-50/50 px-5 py-24 sm:px-8">
+            <div className="mx-auto max-w-[1120px]">
+              <p className="text-sm font-semibold uppercase tracking-wider text-cerulean-700">Trending</p>
+              <h2 className="mt-3 max-w-[520px] text-3xl font-bold tracking-tight text-zinc-900 sm:text-4xl">
+                Popular from ICN
+              </h2>
+              <p className="mt-4 max-w-[560px] text-lg text-zinc-500">
+                Tap a destination — we&apos;ll search and surface the best route for your date.
+              </p>
+              <div className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                {exploreDeals.map((deal) => (
+                  <PopularRouteCard
+                    key={deal.arr}
+                    dep="ICN"
+                    arr={deal.arr}
+                    city={deal.city}
+                    country={deal.country}
+                    flightDate={form.flight_date}
+                    seatClass={form.class_name}
+                    price={deal.topRoute ? priceOf(deal.topRoute) : undefined}
+                    score={deal.topRoute?.recommendation_score}
+                    badge={
+                      deal.topRoute?.discount_percent
+                        ? `-${deal.topRoute.discount_percent}%`
+                        : deal.topRoute?.route_type === "DIRECT"
+                          ? "Direct"
+                          : deal.topRoute
+                            ? "1 stop"
+                            : undefined
+                    }
+                    onSelect={() => pickDestination(deal.arr)}
+                  />
+                ))}
               </div>
             </div>
-            <Link
-              className="mt-5 inline-block rounded border border-navy px-4 py-2 text-sm font-semibold text-navy hover:bg-navy hover:text-white"
-              href={seatHref(row)}
-            >
-              {t.chooseSeat}
-            </Link>
-          </article>
-        ))}
-      </section>
+          </section>
+
+          <section id="smart-picks" className="border-t border-zinc-100 bg-white px-5 py-24 sm:px-8">
+            <div className="mx-auto max-w-[1120px]">
+              <p className="text-sm font-semibold uppercase tracking-wider text-cerulean-700">Smart picks</p>
+              <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <h2 className="text-3xl font-bold tracking-tight text-zinc-900 sm:text-4xl">
+                    {form.dep_airport} → {form.arr_airport}
+                  </h2>
+                  <p className="mt-4 max-w-[560px] text-lg text-zinc-500">
+                    Top scored routes — price, availability, and connection quality combined.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setTab("recommend");
+                    void runSearch("recommend");
+                  }}
+                >
+                  View all smart picks
+                </Button>
+              </div>
+
+              <div className="mt-10 overflow-hidden rounded-2xl border border-zinc-100 bg-white">
+                <div className="divide-y divide-zinc-100">
+                  {recommended.slice(0, 5).map((row, index) => (
+                    <div
+                      key={`${flightIdOf(row)}-${index}`}
+                      className="flex flex-wrap items-center justify-between gap-4 px-6 py-5 transition hover:bg-zinc-50/80"
+                    >
+                      <div className="flex items-center gap-4">
+                        <span
+                          className={cn(
+                            "flex size-9 shrink-0 items-center justify-center rounded-full text-sm font-bold",
+                            index === 0 ? "bg-deep-space-blue text-white" : "bg-zinc-100 text-zinc-600"
+                          )}
+                        >
+                          {index + 1}
+                        </span>
+                        <div>
+                          <p className="font-semibold text-zinc-900">{routeLabel(row)}</p>
+                          <p className="text-sm text-zinc-500">
+                            {row.first_flight_number ?? row.flight_number}
+                            {row.second_flight_number ? ` + ${row.second_flight_number}` : ""} · {row.available_seats} seats left
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <div className="text-right">
+                          <p className="text-xl font-bold tabular-nums text-zinc-900">${priceOf(row).toLocaleString("en-US")}</p>
+                          <p className="text-xs text-zinc-500">{row.recommendation_score ?? "—"} score</p>
+                        </div>
+                        <Link href={seatHref(row)}>
+                          <Button size="sm">Select</Button>
+                        </Link>
+                      </div>
+                    </div>
+                  ))}
+                  {recommended.length === 0 && (
+                    <p className="px-6 py-10 text-center text-sm text-zinc-500">Loading recommendations for your route…</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="features" className="border-t border-zinc-100 bg-zinc-50/50 px-5 py-24 sm:px-8">
+            <div className="mx-auto max-w-[1120px]">
+              <p className="text-sm font-semibold uppercase tracking-wider text-cerulean-700">Features</p>
+              <h2 className="mt-3 max-w-[520px] text-3xl font-bold tracking-tight text-zinc-900 sm:text-4xl">
+                Everything you need to find the right flight
+              </h2>
+              <p className="mt-4 max-w-[560px] text-lg text-zinc-500">
+                Search, compare, and book — in one calm, focused interface.
+              </p>
+              <div className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                {FEATURES.map(({ icon: Icon, title, description }) => (
+                  <div
+                    key={title}
+                    className="group rounded-2xl border border-zinc-100 bg-white p-7 transition-all duration-200 hover:border-zinc-200 hover:shadow-[0_8px_30px_rgba(0,0,0,0.06)]"
+                  >
+                    <div className="flex size-11 items-center justify-center rounded-xl bg-zinc-900 text-white transition-transform duration-200 group-hover:scale-105">
+                      <Icon className="size-5" strokeWidth={1.75} />
+                    </div>
+                    <h3 className="mt-5 text-lg font-semibold text-zinc-900">{title}</h3>
+                    <p className="mt-2 text-[15px] leading-relaxed text-zinc-500">{description}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section id="how-it-works" className="border-t border-zinc-100 bg-white px-5 py-24 sm:px-8">
+            <div className="mx-auto max-w-[1120px]">
+              <h2 className="text-center text-3xl font-bold tracking-tight text-zinc-900 sm:text-4xl">How it works</h2>
+              <p className="mx-auto mt-4 max-w-md text-center text-lg text-zinc-500">Three steps from search to seat selection</p>
+              <div className="mt-16 grid gap-8 md:grid-cols-3">
+                {STEPS.map((item) => (
+                  <div key={item.step} className="relative text-center md:text-left">
+                    <span className="text-5xl font-bold text-zinc-100">{item.step}</span>
+                    <h3 className="mt-2 text-xl font-semibold text-zinc-900">{item.title}</h3>
+                    <p className="mt-2 text-[15px] leading-relaxed text-zinc-500">{item.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        </>
+      )}
+
+      {hasSearched && (
+        <section ref={resultsRef} className="scroll-mt-24 border-t border-zinc-100 bg-zinc-50/50 px-5 py-16 sm:px-8">
+          <div className="mx-auto max-w-[1120px]">
+            <div className="mb-8 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-wider text-cerulean-700">Results</p>
+                <h2 className="mt-2 text-3xl font-bold tracking-tight text-zinc-900">
+                  {form.dep_airport} → {form.arr_airport}
+                </h2>
+                <p className="mt-1 text-zinc-500">
+                  {form.flight_date} · {form.class_name} · {routes.length} result{routes.length === 1 ? "" : "s"}
+                </p>
+              </div>
+              <Button variant="ghost" onClick={() => setHasSearched(false)}>
+                ← Back to explore
+              </Button>
+            </div>
+
+            {routes.length > 0 && tab !== "promotions" && (
+              <div className="mb-6 flex flex-wrap gap-2">
+                {(
+                  [
+                    ["all", "All"],
+                    ["direct", "Direct only"],
+                    ["connections", "1+ stops"]
+                  ] as const
+                ).map(([key, label]) => {
+                  const count =
+                    key === "direct"
+                      ? routes.filter((r) => r.route_type !== "ONE_STOP").length
+                      : key === "connections"
+                        ? routes.filter((r) => r.route_type === "ONE_STOP").length
+                        : routes.length;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setResultFilter(key)}
+                      className={cn(
+                        "rounded-full px-4 py-2 text-sm font-semibold transition",
+                        resultFilter === key
+                          ? "bg-deep-space-blue text-white shadow-sm"
+                          : "border border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300"
+                      )}
+                    >
+                      {label} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              {error && (
+                <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-700 lg:col-span-2">{error}</div>
+              )}
+              {!error && !loading && routes.length === 0 && (
+                <div className="rounded-2xl border border-zinc-100 bg-white p-8 text-center text-zinc-500 lg:col-span-2">
+                  {tab === "promotions"
+                    ? "No flights match this promotion code."
+                    : "No flights found. Try another date or destination."}
+                </div>
+              )}
+              {!error && !loading && routes.length > 0 && visibleRoutes.length === 0 && (
+                <div className="rounded-2xl border border-zinc-100 bg-white p-8 text-center text-zinc-500 lg:col-span-2">
+                  No flights match this filter. Try &quot;All&quot; or another tab.
+                </div>
+              )}
+              {visibleRoutes.map((row, index) => (
+                <FlightResultCard key={`${flightIdOf(row)}-${index}`} row={row} index={index} />
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {!hasSearched && authReady && !sessionUser && (
+        <section className="mx-5 mb-24 sm:mx-8">
+          <div className="mx-auto max-w-[1120px] overflow-hidden rounded-3xl bg-deep-space-blue px-8 py-16 text-center sm:px-16 sm:py-20">
+            <h2 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">Ready to book your next flight?</h2>
+            <p className="mx-auto mt-4 max-w-lg text-lg text-sky-blue-light/90">
+              Create an account to save bookings, or sign in as staff to manage operations.
+            </p>
+            <div className="mt-10 flex flex-wrap justify-center gap-4">
+              <Link href="/signup">
+                <Button variant="inverted" size="lg">
+                  Create account
+                </Button>
+              </Link>
+              <Link href="/login">
+                <Button variant="onDark" size="lg">
+                  Sign in
+                </Button>
+              </Link>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <footer className="border-t border-zinc-100 bg-zinc-50/50">
+        <div className="mx-auto max-w-[1120px] px-5 py-12 sm:px-8">
+          <div className="flex flex-col gap-8 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <span className="flex size-8 items-center justify-center rounded-lg bg-deep-space-blue text-white">
+                  <Plane className="size-3.5" strokeWidth={1.75} />
+                </span>
+                <span className="font-semibold text-zinc-900">CSE305 Air</span>
+              </div>
+              <p className="mt-3 max-w-xs text-sm leading-relaxed text-zinc-500">
+                MariaDB stored procedure airline reservation demo for CSE305.
+              </p>
+            </div>
+            <div className="flex gap-12 text-sm">
+              <div>
+                <p className="font-medium text-zinc-900">Product</p>
+                <ul className="mt-3 space-y-2 text-zinc-500">
+                  <li>
+                    <Link href="/" className="hover:text-zinc-800">
+                      Search flights
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/login" className="hover:text-zinc-800">
+                      Sign in
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/signup" className="hover:text-zinc-800">
+                      Create account
+                    </Link>
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium text-zinc-900">Staff</p>
+                <ul className="mt-3 space-y-2 text-zinc-500">
+                  <li>
+                    <Link href="/dashboard" className="hover:text-zinc-800">
+                      Dashboard
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/signup/staff" className="hover:text-zinc-800">
+                      Request access
+                    </Link>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <p className="mt-10 border-t border-zinc-200/80 pt-8 text-center text-xs text-zinc-400 sm:text-left">
+            © {new Date().getFullYear()} CSE305 Air. All rights reserved.
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
