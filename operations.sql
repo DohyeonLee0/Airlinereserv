@@ -67,6 +67,25 @@ DROP PROCEDURE IF EXISTS revenue_report_by_month;
 DROP PROCEDURE IF EXISTS revenue_and_load_factor_report;
 DROP PROCEDURE IF EXISTS revenue_report_by_route;
 DROP PROCEDURE IF EXISTS revenue_breakdown_by_seat_class;
+DROP PROCEDURE IF EXISTS revenue_report_by_quarter;
+DROP PROCEDURE IF EXISTS register_customer;
+DROP PROCEDURE IF EXISTS submit_staff_request;
+DROP PROCEDURE IF EXISTS approve_staff_request;
+DROP PROCEDURE IF EXISTS reject_staff_request;
+DROP PROCEDURE IF EXISTS list_pending_staff_requests;
+DROP PROCEDURE IF EXISTS get_customer_bookings;
+DROP PROCEDURE IF EXISTS get_all_bookings_for_staff;
+DROP PROCEDURE IF EXISTS get_booking_legs_for_staff;
+DROP PROCEDURE IF EXISTS get_booking_activity_log;
+DROP PROCEDURE IF EXISTS get_customer_name_parts;
+DROP PROCEDURE IF EXISTS upsert_airline;
+DROP PROCEDURE IF EXISTS delete_airline;
+DROP PROCEDURE IF EXISTS upsert_airport;
+DROP PROCEDURE IF EXISTS delete_airport;
+DROP PROCEDURE IF EXISTS upsert_aircraft;
+DROP PROCEDURE IF EXISTS upsert_flight_schedule;
+DROP PROCEDURE IF EXISTS upsert_promotion;
+DROP PROCEDURE IF EXISTS deactivate_promotion;
 
 DROP TRIGGER IF EXISTS check_flight_seat_aircraft_insert;
 DROP TRIGGER IF EXISTS check_flight_seat_aircraft_update;
@@ -237,26 +256,33 @@ DELIMITER ;
 DELIMITER //
 
 CREATE PROCEDURE generate_flights_from_schedule (
-    IN p_schedule_id INT,
-    IN p_aircraft_id INT,
-    IN p_start_date  DATE,
-    IN p_end_date    DATE
+    IN p_schedule_id   INT,
+    IN p_aircraft_id   INT,
+    IN p_start_date    DATE,
+    IN p_end_date      DATE,
+    IN p_trip_type_id  INT
 )
 BEGIN
-    DECLARE v_current_date    DATE;
-    DECLARE v_day_name        VARCHAR(3);
-    DECLARE v_next_flight_id  INT;
-    DECLARE v_valid_from      DATE;
-    DECLARE v_valid_to        DATE;
-    DECLARE v_aircraft_exists INT;
+    DECLARE v_current_date     DATE;
+    DECLARE v_day_name         VARCHAR(3);
+    DECLARE v_next_flight_id   INT;
+    DECLARE v_next_itinerary_id INT;
+    DECLARE v_valid_from       DATE;
+    DECLARE v_valid_to         DATE;
+    DECLARE v_aircraft_exists  INT;
+    DECLARE v_itinerary_id     INT;
+    DECLARE v_leg_type         VARCHAR(10);
+    DECLARE v_trip_type        VARCHAR(15);
+    DECLARE v_dep_airport      CHAR(3);
+    DECLARE v_arr_airport      CHAR(3);
 
     IF p_start_date > p_end_date THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Start date cannot be after end date';
     END IF;
 
-    SELECT valid_from, valid_to
-    INTO   v_valid_from, v_valid_to
+    SELECT valid_from, valid_to, dep_airport, arr_airport
+    INTO   v_valid_from, v_valid_to, v_dep_airport, v_arr_airport
     FROM   flight_schedules
     WHERE  schedule_id = p_schedule_id;
 
@@ -280,11 +306,33 @@ BEGIN
         SET MESSAGE_TEXT = 'Aircraft does not exist';
     END IF;
 
+    CASE p_trip_type_id
+        WHEN 1 THEN
+            SET v_itinerary_id = 10;
+            SET v_trip_type = 'OneWay';
+            SET v_leg_type = 'Outbound';
+        WHEN 2 THEN
+            SET v_itinerary_id = 20;
+            SET v_trip_type = 'RoundTrip';
+            SET v_leg_type = 'Outbound';
+        WHEN 3 THEN
+            SET v_itinerary_id = 30;
+            SET v_trip_type = 'Connecting';
+            SET v_leg_type = 'Outbound';
+        ELSE
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Invalid trip type id (Must be 1: OneWay, 2: RoundTrip, 3: Connecting)';
+    END CASE;
+
     SET v_current_date = p_start_date;
 
     SELECT COALESCE(MAX(flight_id), 0) + 1
     INTO   v_next_flight_id
     FROM   flights;
+
+    SELECT COALESCE(MAX(itinerary_id), 0) + 1
+    INTO   v_next_itinerary_id
+    FROM   itineraries;
 
     WHILE v_current_date <= p_end_date DO
 
@@ -306,15 +354,24 @@ BEGIN
               AND  day_of_week  = v_day_name
         ) THEN
 
-            INSERT IGNORE INTO flights (
-                flight_id, schedule_id, flight_date, aircraft_id, status
+            INSERT INTO itineraries (
+                itinerary_id, trip_type, departure_airport_code, arrival_airport_code
             )
             VALUES (
-                v_next_flight_id, p_schedule_id,
-                v_current_date, p_aircraft_id, 'Scheduled'
+                v_next_itinerary_id, v_trip_type, v_dep_airport, v_arr_airport
+            );
+
+            INSERT IGNORE INTO flights (
+                flight_id, itinerary_id, schedule_id, flight_date, aircraft_id,
+                segment_order, leg_type, status
+            )
+            VALUES (
+                v_next_flight_id, v_next_itinerary_id, p_schedule_id,
+                v_current_date, p_aircraft_id, 1, v_leg_type, 'Scheduled'
             );
 
             SET v_next_flight_id = v_next_flight_id + 1;
+            SET v_next_itinerary_id = v_next_itinerary_id + 1;
 
         END IF;
 
@@ -401,6 +458,7 @@ CREATE PROCEDURE search_flights (
 BEGIN
     SELECT
         f.flight_id,
+        f.itinerary_id,
         fs.airline_id,
         fs.flight_number,
         fs.dep_airport,
@@ -409,6 +467,8 @@ BEGIN
         fs.dep_time,
         fs.arr_time,
         f.status,
+        f.segment_order,
+        f.leg_type,
         COUNT(CASE WHEN fls.is_available = 1 THEN 1 END)     AS available_seats,
         MIN(CASE WHEN fls.is_available = 1 THEN fls.price END) AS lowest_available_price
     FROM   flights f
@@ -419,9 +479,9 @@ BEGIN
       AND  f.flight_date  = p_flight_date
       AND  f.status       = 'Scheduled'
     GROUP BY
-        f.flight_id, fs.airline_id, fs.flight_number,
+        f.flight_id, f.itinerary_id, fs.airline_id, fs.flight_number,
         fs.dep_airport, fs.arr_airport,
-        f.flight_date, fs.dep_time, fs.arr_time, f.status
+        f.flight_date, fs.dep_time, fs.arr_time, f.status, f.segment_order, f.leg_type
     ORDER BY fs.dep_time;
 END //
 
@@ -1121,30 +1181,14 @@ CREATE PROCEDURE split_name_last_first()
 BEGIN
     SELECT
         user_id,
-        name AS full_name,
-
-        CASE
-            WHEN name LIKE '% %'
-            THEN SUBSTRING_INDEX(name, ' ', -1)
-            ELSE name
-        END AS last_name,
-
-        CASE
-            WHEN name LIKE '% %'
-            THEN TRIM(
-                SUBSTRING(
-                    name,
-                    1,
-                    LENGTH(name) - LENGTH(SUBSTRING_INDEX(name, ' ', -1))
-                )
-            )
-            ELSE ''
-        END AS first_name,
-
+        first_name,
+        middle_name,
+        last_name,
+        TRIM(CONCAT_WS(' ', first_name, NULLIF(TRIM(middle_name), ''), last_name)) AS full_name,
         email
-
-    FROM  users
-    WHERE role = 'Customer';
+    FROM users
+    WHERE role = 'Customer'
+    ORDER BY user_id;
 END //
 
 DELIMITER ;
@@ -1161,10 +1205,14 @@ CREATE PROCEDURE get_customer_full_name()
 BEGIN
     SELECT
         user_id,
-        name AS full_name,
+        first_name,
+        middle_name,
+        last_name,
+        TRIM(CONCAT_WS(' ', first_name, NULLIF(TRIM(middle_name), ''), last_name)) AS full_name,
         email
     FROM users
     WHERE role = 'Customer'
+      AND status = 'Active'
     ORDER BY user_id;
 END //
 
@@ -1208,6 +1256,7 @@ BEGIN
     DECLARE v_hold_count    INT;
     DECLARE v_class_id      INT;
     DECLARE v_discount      DECIMAL(5,2);
+    DECLARE v_itinerary_id  INT;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -1238,8 +1287,8 @@ BEGIN
     END IF;
 
     -- Validate flight status
-    SELECT status
-    INTO   v_flight_status
+    SELECT status, itinerary_id
+    INTO   v_flight_status, v_itinerary_id
     FROM   flights
     WHERE  flight_id = p_flight_id
     FOR UPDATE;
@@ -1308,9 +1357,9 @@ BEGIN
         SET v_price = ROUND(v_price * (1 - v_discount / 100), 2);
     END IF;
 
-    -- Create booking
-    INSERT INTO bookings (booking_id, user_id, flight_id, status)
-    VALUES (p_booking_id, p_user_id, p_flight_id, 'Active');
+    -- Create booking (itinerary-level, per ER diagram)
+    INSERT INTO bookings (booking_id, user_id, itinerary_id, status)
+    VALUES (p_booking_id, p_user_id, v_itinerary_id, 'Active');
 
     -- Assign seat to booking
     INSERT INTO booking_seats (booking_id, flight_id, seat_number)
@@ -1383,14 +1432,20 @@ DELIMITER //
 
 CREATE PROCEDURE cancel_reservation (
     IN p_refund_id  INT,
-    IN p_booking_id INT
+    IN p_booking_id INT,
+    IN p_user_id    VARCHAR(20)
 )
 BEGIN
-    DECLARE v_flight_id   INT;
-    DECLARE v_seat_number VARCHAR(5);
-    DECLARE v_payment_id  INT;
-    DECLARE v_amount      DECIMAL(10,2);
-    DECLARE v_status      VARCHAR(10);
+    DECLARE v_itinerary_id   INT DEFAULT NULL;
+    DECLARE v_payment_id     INT DEFAULT NULL;
+    DECLARE v_amount         DECIMAL(10,2) DEFAULT NULL;
+    DECLARE v_status         VARCHAR(10) DEFAULT NULL;
+    DECLARE v_owner_id       VARCHAR(20) DEFAULT NULL;
+
+    DECLARE v_booking_count  INT DEFAULT 0;
+    DECLARE v_seat_count     INT DEFAULT 0;
+    DECLARE v_payment_count  INT DEFAULT 0;
+    DECLARE v_refund_count   INT DEFAULT 0;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -1398,18 +1453,28 @@ BEGIN
         RESIGNAL;
     END;
 
+    SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
     START TRANSACTION;
 
-    -- Lock booking row
-    SELECT status, flight_id
-    INTO   v_status, v_flight_id
+    SELECT COUNT(*)
+    INTO   v_booking_count
+    FROM   bookings
+    WHERE  booking_id = p_booking_id;
+
+    IF v_booking_count = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Booking does not exist';
+    END IF;
+
+    SELECT status, itinerary_id, user_id
+    INTO   v_status, v_itinerary_id, v_owner_id
     FROM   bookings
     WHERE  booking_id = p_booking_id
     FOR UPDATE;
 
-    IF v_status IS NULL THEN
+    IF v_owner_id <> p_user_id THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Booking does not exist';
+        SET MESSAGE_TEXT = 'You can only cancel your own bookings';
     END IF;
 
     IF v_status <> 'Active' THEN
@@ -1417,43 +1482,66 @@ BEGIN
         SET MESSAGE_TEXT = 'Booking is not active';
     END IF;
 
-    -- Find the assigned seat
-    SELECT seat_number
-    INTO   v_seat_number
-    FROM   booking_seats
-    WHERE  booking_id = p_booking_id
-    LIMIT 1;
+    SELECT COUNT(*)
+    INTO   v_refund_count
+    FROM   refunds
+    WHERE  booking_id = p_booking_id;
 
-    IF v_seat_number IS NULL THEN
+    IF v_refund_count > 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Refund already exists for this booking';
+    END IF;
+
+    SELECT COUNT(*)
+    INTO   v_seat_count
+    FROM   booking_seats
+    WHERE  booking_id = p_booking_id;
+
+    IF v_seat_count = 0 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'No seat assigned to this booking';
     END IF;
 
-    -- Find the successful payment
-    SELECT payment_id, amount
-    INTO   v_payment_id, v_amount
+    SELECT COUNT(*)
+    INTO   v_payment_count
     FROM   payments
     WHERE  booking_id = p_booking_id
-      AND  status     = 'SUCCESS'
-    LIMIT 1;
+      AND  status = 'SUCCESS';
 
-    IF v_payment_id IS NULL THEN
+    IF v_payment_count = 0 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'No successful payment found';
     END IF;
 
-    -- Cancel booking
+    SELECT payment_id, amount
+    INTO   v_payment_id, v_amount
+    FROM   payments
+    WHERE  booking_id = p_booking_id
+      AND  status = 'SUCCESS'
+    LIMIT 1
+    FOR UPDATE;
+
     UPDATE bookings
     SET    status = 'Cancelled'
     WHERE  booking_id = p_booking_id;
 
-    -- Release seat
-    UPDATE flight_seats
-    SET    is_available = 1
-    WHERE  flight_id   = v_flight_id
-      AND  seat_number = v_seat_number;
+    UPDATE flight_seats fs
+    JOIN   booking_seats bs
+           ON fs.flight_id = bs.flight_id
+          AND fs.seat_number = bs.seat_number
+    JOIN   flights f
+           ON fs.flight_id = f.flight_id
+    SET    fs.is_available = 1
+    WHERE  bs.booking_id = p_booking_id
+      AND  f.itinerary_id = v_itinerary_id;
 
-    -- Create full refund record
+    DELETE FROM tickets
+    WHERE booking_id = p_booking_id;
+
+    UPDATE payments
+    SET    status = 'REFUNDED'
+    WHERE  payment_id = v_payment_id;
+
     INSERT INTO refunds (refund_id, booking_id, payment_id, refund_amount)
     VALUES (p_refund_id, p_booking_id, v_payment_id, v_amount);
 
@@ -1479,24 +1567,39 @@ BEGIN
         fs.airline_id,
         fs.flight_number,
         f.flight_id,
+        f.itinerary_id,
         f.flight_date,
         fs.dep_airport,
         fs.arr_airport,
         COUNT(DISTINCT t.ticket_id) AS tickets_sold,
-        COALESCE(SUM(p.amount), 0)  AS total_revenue
-    FROM   flights f
-    JOIN   flight_schedules fs ON f.schedule_id = fs.schedule_id
+        COALESCE(SUM(fls.price), 0) AS total_revenue
+    FROM flights f
+    JOIN flight_schedules fs
+         ON f.schedule_id = fs.schedule_id
+    LEFT JOIN tickets t
+         ON f.flight_id = t.flight_id
     LEFT JOIN bookings b
-           ON f.flight_id  = b.flight_id
-          AND b.status     = 'Active'
-    LEFT JOIN tickets t    ON b.booking_id = t.booking_id
+         ON t.booking_id = b.booking_id
+        AND b.status = 'Active'
     LEFT JOIN payments p
-           ON b.booking_id = p.booking_id
-          AND p.status     = 'SUCCESS'
+         ON b.booking_id = p.booking_id
+        AND p.status = 'SUCCESS'
+    LEFT JOIN flight_seats fls
+         ON t.flight_id = fls.flight_id
+        AND t.seat_number = fls.seat_number
+    WHERE b.booking_id IS NULL
+       OR p.payment_id IS NOT NULL
     GROUP BY
-        fs.airline_id, fs.flight_number, f.flight_id,
-        f.flight_date, fs.dep_airport, fs.arr_airport
-    ORDER BY total_revenue DESC, f.flight_date ASC;
+        fs.airline_id,
+        fs.flight_number,
+        f.flight_id,
+        f.itinerary_id,
+        f.flight_date,
+        fs.dep_airport,
+        fs.arr_airport
+    ORDER BY
+        total_revenue DESC,
+        f.flight_date ASC;
 END //
 
 DELIMITER ;
@@ -1517,21 +1620,30 @@ BEGIN
     SELECT
         fs.airline_id,
         DATE_FORMAT(f.flight_date, '%Y-%m') AS revenue_month,
-        COUNT(DISTINCT t.ticket_id)          AS tickets_sold,
-        COALESCE(SUM(p.amount), 0)           AS monthly_revenue
-    FROM   flights f
-    JOIN   flight_schedules fs ON f.schedule_id = fs.schedule_id
+        COUNT(DISTINCT t.ticket_id)         AS tickets_sold,
+        COALESCE(SUM(fls.price), 0)         AS monthly_revenue
+    FROM flights f
+    JOIN flight_schedules fs
+         ON f.schedule_id = fs.schedule_id
+    LEFT JOIN tickets t
+         ON f.flight_id = t.flight_id
     LEFT JOIN bookings b
-           ON f.flight_id  = b.flight_id
-          AND b.status     = 'Active'
-    LEFT JOIN tickets t    ON b.booking_id = t.booking_id
+         ON t.booking_id = b.booking_id
+        AND b.status = 'Active'
     LEFT JOIN payments p
-           ON b.booking_id = p.booking_id
-          AND p.status     = 'SUCCESS'
+         ON b.booking_id = p.booking_id
+        AND p.status = 'SUCCESS'
+    LEFT JOIN flight_seats fls
+         ON t.flight_id = fls.flight_id
+        AND t.seat_number = fls.seat_number
+    WHERE b.booking_id IS NULL
+       OR p.payment_id IS NOT NULL
     GROUP BY
         fs.airline_id,
         DATE_FORMAT(f.flight_date, '%Y-%m')
-    ORDER BY revenue_month, fs.airline_id;
+    ORDER BY
+        revenue_month,
+        fs.airline_id;
 END //
 
 DELIMITER ;
@@ -1555,33 +1667,74 @@ BEGIN
         fs.airline_id,
         fs.flight_number,
         f.flight_id,
+        f.itinerary_id,
         f.flight_date,
         fs.dep_airport,
         fs.arr_airport,
-        COUNT(DISTINCT t.ticket_id)     AS sold_seats,
-        COUNT(DISTINCT fls.seat_number) AS total_seats,
+
+        COALESCE(sold_stats.sold_seats, 0)  AS sold_seats,
+        COALESCE(seat_stats.total_seats, 0) AS total_seats,
+
         ROUND(
             CASE
-                WHEN COUNT(DISTINCT fls.seat_number) = 0 THEN 0
-                ELSE COUNT(DISTINCT t.ticket_id)
-                     / COUNT(DISTINCT fls.seat_number) * 100
-            END, 2
-        )                               AS load_factor_percent,
-        COALESCE(SUM(p.amount), 0)      AS total_revenue
-    FROM   flights f
-    JOIN   flight_schedules fs ON f.schedule_id = fs.schedule_id
-    LEFT JOIN flight_seats fls  ON f.flight_id   = fls.flight_id
-    LEFT JOIN bookings b
-           ON f.flight_id  = b.flight_id
-          AND b.status     = 'Active'
-    LEFT JOIN tickets t    ON b.booking_id = t.booking_id
-    LEFT JOIN payments p
-           ON b.booking_id = p.booking_id
-          AND p.status     = 'SUCCESS'
-    GROUP BY
-        fs.airline_id, fs.flight_number, f.flight_id,
-        f.flight_date, fs.dep_airport, fs.arr_airport
-    ORDER BY f.flight_date, fs.flight_number;
+                WHEN COALESCE(seat_stats.total_seats, 0) = 0 THEN 0
+                ELSE COALESCE(sold_stats.sold_seats, 0) * 100.0
+                     / seat_stats.total_seats
+            END,
+            2
+        ) AS load_factor_percent,
+
+        COALESCE(revenue_stats.total_revenue, 0) AS total_revenue
+
+    FROM flights f
+    JOIN flight_schedules fs
+         ON f.schedule_id = fs.schedule_id
+
+    LEFT JOIN (
+        SELECT
+            flight_id,
+            COUNT(DISTINCT seat_number) AS total_seats
+        FROM flight_seats
+        GROUP BY flight_id
+    ) seat_stats
+        ON f.flight_id = seat_stats.flight_id
+
+    LEFT JOIN (
+        SELECT
+            t.flight_id,
+            COUNT(DISTINCT t.ticket_id) AS sold_seats
+        FROM tickets t
+        JOIN bookings b
+             ON t.booking_id = b.booking_id
+            AND b.status = 'Active'
+        JOIN payments p
+             ON b.booking_id = p.booking_id
+            AND p.status = 'SUCCESS'
+        GROUP BY t.flight_id
+    ) sold_stats
+        ON f.flight_id = sold_stats.flight_id
+
+    LEFT JOIN (
+        SELECT
+            t.flight_id,
+            SUM(fls.price) AS total_revenue
+        FROM tickets t
+        JOIN bookings b
+             ON t.booking_id = b.booking_id
+            AND b.status = 'Active'
+        JOIN payments p
+             ON b.booking_id = p.booking_id
+            AND p.status = 'SUCCESS'
+        JOIN flight_seats fls
+             ON t.flight_id = fls.flight_id
+            AND t.seat_number = fls.seat_number
+        GROUP BY t.flight_id
+    ) revenue_stats
+        ON f.flight_id = revenue_stats.flight_id
+
+    ORDER BY
+        f.flight_date,
+        fs.flight_number;
 END //
 
 DELIMITER ;
@@ -1601,20 +1754,29 @@ BEGIN
     SELECT
         fs.dep_airport,
         fs.arr_airport,
-        COUNT(DISTINCT f.flight_id) AS operated_flights,
         COUNT(DISTINCT t.ticket_id) AS tickets_sold,
-        COALESCE(SUM(p.amount), 0)  AS total_revenue
-    FROM   flights f
-    JOIN   flight_schedules fs ON f.schedule_id = fs.schedule_id
+        COALESCE(SUM(fls.price), 0) AS route_revenue
+    FROM flights f
+    JOIN flight_schedules fs
+         ON f.schedule_id = fs.schedule_id
+    LEFT JOIN tickets t
+         ON f.flight_id = t.flight_id
     LEFT JOIN bookings b
-           ON f.flight_id  = b.flight_id
-          AND b.status     = 'Active'
-    LEFT JOIN tickets t    ON b.booking_id = t.booking_id
+         ON t.booking_id = b.booking_id
+        AND b.status = 'Active'
     LEFT JOIN payments p
-           ON b.booking_id = p.booking_id
-          AND p.status     = 'SUCCESS'
-    GROUP BY fs.dep_airport, fs.arr_airport
-    ORDER BY total_revenue DESC, tickets_sold DESC;
+         ON b.booking_id = p.booking_id
+        AND p.status = 'SUCCESS'
+    LEFT JOIN flight_seats fls
+         ON t.flight_id = fls.flight_id
+        AND t.seat_number = fls.seat_number
+    WHERE b.booking_id IS NULL
+       OR p.payment_id IS NOT NULL
+    GROUP BY
+        fs.dep_airport,
+        fs.arr_airport
+    ORDER BY
+        route_revenue DESC;
 END //
 
 DELIMITER ;
@@ -1635,45 +1797,764 @@ BEGIN
     SELECT
         sc.class_name,
         COUNT(DISTINCT t.ticket_id) AS tickets_sold,
-        COALESCE(SUM(p.amount), 0)  AS total_revenue,
+        COALESCE(SUM(fls.price), 0) AS class_revenue,
         ROUND(
-            CASE
-                WHEN (
-                    SELECT COALESCE(SUM(p2.amount), 0)
-                    FROM payments p2
-                    JOIN bookings b2 ON p2.booking_id = b2.booking_id
-                    WHERE p2.status = 'SUCCESS'
-                      AND b2.status = 'Active'
-                ) = 0 THEN 0
-                ELSE COALESCE(SUM(p.amount), 0) / (
-                    SELECT COALESCE(SUM(p2.amount), 0)
-                    FROM payments p2
-                    JOIN bookings b2 ON p2.booking_id = b2.booking_id
-                    WHERE p2.status = 'SUCCESS'
-                      AND b2.status = 'Active'
-                ) * 100
-            END,
+            COALESCE(SUM(fls.price), 0)
+            / NULLIF(total_stats.total_revenue, 0) * 100,
             2
-        ) AS revenue_percent
-    FROM   seat_classes sc
-    LEFT JOIN flight_seats fls ON sc.class_id = fls.class_id
-    LEFT JOIN tickets t
-           ON fls.flight_id    = t.flight_id
-          AND fls.seat_number  = t.seat_number
-    LEFT JOIN bookings b
-           ON t.booking_id = b.booking_id
-          AND b.status     = 'Active'
-    LEFT JOIN payments p
-           ON b.booking_id = p.booking_id
-          AND p.status     = 'SUCCESS'
-    GROUP BY sc.class_name
-    ORDER BY total_revenue DESC, sc.class_name;
+        ) AS revenue_percentage
+    FROM tickets t
+    JOIN bookings b
+         ON t.booking_id = b.booking_id
+        AND b.status = 'Active'
+    JOIN payments p
+         ON b.booking_id = p.booking_id
+        AND p.status = 'SUCCESS'
+    JOIN flight_seats fls
+         ON t.flight_id = fls.flight_id
+        AND t.seat_number = fls.seat_number
+    JOIN seat_classes sc
+         ON fls.class_id = sc.class_id
+    CROSS JOIN (
+        SELECT
+            SUM(fls2.price) AS total_revenue
+        FROM tickets t2
+        JOIN bookings b2
+             ON t2.booking_id = b2.booking_id
+            AND b2.status = 'Active'
+        JOIN payments p2
+             ON b2.booking_id = p2.booking_id
+            AND p2.status = 'SUCCESS'
+        JOIN flight_seats fls2
+             ON t2.flight_id = fls2.flight_id
+            AND t2.seat_number = fls2.seat_number
+    ) total_stats
+    GROUP BY
+        sc.class_name,
+        total_stats.total_revenue
+    ORDER BY
+        class_revenue DESC;
 END //
 
 DELIMITER ;
 
 -- Example:
 -- CALL revenue_breakdown_by_seat_class();
+
+
+-- ============================================================
+-- AUTH & CUSTOMER BOOKINGS
+-- ============================================================
+
+DELIMITER //
+
+CREATE PROCEDURE get_customer_name_parts()
+BEGIN
+    SELECT
+        user_id,
+        first_name,
+        middle_name,
+        last_name,
+        TRIM(CONCAT_WS(' ', first_name, NULLIF(TRIM(middle_name), ''), last_name)) AS display_name,
+        email,
+        role,
+        status
+    FROM users
+    WHERE role = 'Customer'
+      AND status = 'Active'
+    ORDER BY user_id;
+END //
+
+CREATE PROCEDURE register_customer (
+    IN  p_first_name  VARCHAR(50),
+    IN  p_middle_name VARCHAR(50),
+    IN  p_last_name   VARCHAR(50),
+    IN  p_email       VARCHAR(100),
+    IN  p_password    VARCHAR(255),
+    OUT p_user_id     VARCHAR(20)
+)
+BEGIN
+    DECLARE v_next_num INT;
+
+    IF TRIM(p_first_name) = '' OR TRIM(p_last_name) = '' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'First name and last name are required';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM users WHERE email = p_email) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Email already registered';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM staff_registration_requests WHERE email = p_email AND status = 'Pending') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Email already has a pending staff request';
+    END IF;
+
+    SELECT COALESCE(MAX(CAST(SUBSTRING(user_id, 5) AS UNSIGNED)), 0) + 1
+    INTO   v_next_num
+    FROM   users
+    WHERE  user_id LIKE 'cust%';
+
+    SET p_user_id = CONCAT('cust', LPAD(v_next_num, 2, '0'));
+
+    INSERT INTO users (
+        user_id, first_name, middle_name, last_name,
+        email, password, role, status
+    )
+    VALUES (
+        p_user_id,
+        TRIM(p_first_name),
+        NULLIF(TRIM(p_middle_name), ''),
+        TRIM(p_last_name),
+        TRIM(p_email),
+        p_password,
+        'Customer',
+        'Active'
+    );
+END //
+
+CREATE PROCEDURE submit_staff_request (
+    IN  p_first_name      VARCHAR(50),
+    IN  p_middle_name     VARCHAR(50),
+    IN  p_last_name       VARCHAR(50),
+    IN  p_email           VARCHAR(100),
+    IN  p_password        VARCHAR(255),
+    IN  p_requested_role  VARCHAR(20),
+    OUT p_request_id      INT
+)
+BEGIN
+    IF TRIM(p_first_name) = '' OR TRIM(p_last_name) = '' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'First name and last name are required';
+    END IF;
+
+    IF p_requested_role NOT IN ('Staff', 'Admin') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Requested role must be Staff or Admin';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM users WHERE email = p_email) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Email already registered';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM staff_registration_requests
+        WHERE email = p_email AND status = 'Pending'
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'A pending request already exists for this email';
+    END IF;
+
+    SELECT COALESCE(MAX(request_id), 0) + 1 INTO p_request_id FROM staff_registration_requests;
+
+    INSERT INTO staff_registration_requests (
+        request_id, first_name, middle_name, last_name,
+        email, password, requested_role, status
+    )
+    VALUES (
+        p_request_id,
+        TRIM(p_first_name),
+        NULLIF(TRIM(p_middle_name), ''),
+        TRIM(p_last_name),
+        TRIM(p_email),
+        p_password,
+        p_requested_role,
+        'Pending'
+    );
+END //
+
+CREATE PROCEDURE list_pending_staff_requests (
+    IN p_reviewer_id VARCHAR(20)
+)
+BEGIN
+    DECLARE v_reviewer_role VARCHAR(20);
+
+    SELECT role INTO v_reviewer_role
+    FROM users
+    WHERE user_id = p_reviewer_id AND status = 'Active';
+
+    IF v_reviewer_role IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Reviewer does not exist';
+    END IF;
+
+    IF v_reviewer_role NOT IN ('Admin', 'SuperAdmin') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Only Admin or SuperAdmin can review staff requests';
+    END IF;
+
+    SELECT
+        r.request_id,
+        r.first_name,
+        r.middle_name,
+        r.last_name,
+        TRIM(CONCAT_WS(' ', r.first_name, NULLIF(TRIM(r.middle_name), ''), r.last_name)) AS display_name,
+        r.email,
+        r.requested_role,
+        r.status,
+        r.requested_at
+    FROM staff_registration_requests r
+    WHERE r.status = 'Pending'
+      AND (
+          (v_reviewer_role = 'SuperAdmin' AND r.requested_role IN ('Staff', 'Admin'))
+          OR (v_reviewer_role = 'Admin' AND r.requested_role = 'Staff')
+      )
+    ORDER BY r.requested_at;
+END //
+
+CREATE PROCEDURE approve_staff_request (
+    IN p_request_id  INT,
+    IN p_reviewer_id VARCHAR(20)
+)
+BEGIN
+    DECLARE v_reviewer_role VARCHAR(20);
+    DECLARE v_requested_role VARCHAR(20);
+    DECLARE v_status VARCHAR(20);
+    DECLARE v_email VARCHAR(100);
+    DECLARE v_password VARCHAR(255);
+    DECLARE v_first_name VARCHAR(50);
+    DECLARE v_middle_name VARCHAR(50);
+    DECLARE v_last_name VARCHAR(50);
+    DECLARE v_new_user_id VARCHAR(20);
+    DECLARE v_next_num INT;
+    DECLARE v_prefix VARCHAR(10);
+
+    SELECT role INTO v_reviewer_role
+    FROM users
+    WHERE user_id = p_reviewer_id AND status = 'Active';
+
+    IF v_reviewer_role IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Reviewer does not exist';
+    END IF;
+
+    SELECT requested_role, status, email, password,
+           first_name, middle_name, last_name
+    INTO   v_requested_role, v_status, v_email, v_password,
+           v_first_name, v_middle_name, v_last_name
+    FROM   staff_registration_requests
+    WHERE  request_id = p_request_id
+    FOR UPDATE;
+
+    IF v_status IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Staff request does not exist';
+    END IF;
+
+    IF v_status <> 'Pending' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Staff request is not pending';
+    END IF;
+
+    IF v_requested_role = 'Admin' AND v_reviewer_role <> 'SuperAdmin' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Only SuperAdmin can approve Admin requests';
+    END IF;
+
+    IF v_requested_role = 'Staff' AND v_reviewer_role NOT IN ('Admin', 'SuperAdmin') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Only Admin or SuperAdmin can approve Staff requests';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM users WHERE email = v_email) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Email already registered';
+    END IF;
+
+    IF v_requested_role = 'Admin' THEN
+        SET v_prefix = 'admin';
+        SELECT COALESCE(MAX(CAST(SUBSTRING(user_id, 6) AS UNSIGNED)), 0) + 1
+        INTO   v_next_num
+        FROM   users
+        WHERE  user_id LIKE 'admin%';
+        SET v_new_user_id = CONCAT('admin', LPAD(v_next_num, 2, '0'));
+    ELSE
+        SET v_prefix = 'staff';
+        SELECT COALESCE(MAX(CAST(SUBSTRING(user_id, 6) AS UNSIGNED)), 0) + 1
+        INTO   v_next_num
+        FROM   users
+        WHERE  user_id LIKE 'staff%';
+        SET v_new_user_id = CONCAT('staff', LPAD(v_next_num, 2, '0'));
+    END IF;
+
+    INSERT INTO users (
+        user_id, first_name, middle_name, last_name,
+        email, password, role, status
+    )
+    VALUES (
+        v_new_user_id, v_first_name, v_middle_name, v_last_name,
+        v_email, v_password, v_requested_role, 'Active'
+    );
+
+    UPDATE staff_registration_requests
+    SET    status = 'Approved',
+           reviewed_by = p_reviewer_id,
+           reviewed_at = CURRENT_TIMESTAMP
+    WHERE  request_id = p_request_id;
+END //
+
+CREATE PROCEDURE reject_staff_request (
+    IN p_request_id   INT,
+    IN p_reviewer_id  VARCHAR(20),
+    IN p_reject_reason VARCHAR(255)
+)
+BEGIN
+    DECLARE v_reviewer_role VARCHAR(20);
+    DECLARE v_requested_role VARCHAR(20);
+    DECLARE v_status VARCHAR(20);
+
+    SELECT role INTO v_reviewer_role
+    FROM users
+    WHERE user_id = p_reviewer_id AND status = 'Active';
+
+    IF v_reviewer_role IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Reviewer does not exist';
+    END IF;
+
+    SELECT requested_role, status
+    INTO   v_requested_role, v_status
+    FROM   staff_registration_requests
+    WHERE  request_id = p_request_id
+    FOR UPDATE;
+
+    IF v_status IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Staff request does not exist';
+    END IF;
+
+    IF v_status <> 'Pending' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Staff request is not pending';
+    END IF;
+
+    IF v_requested_role = 'Admin' AND v_reviewer_role <> 'SuperAdmin' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Only SuperAdmin can reject Admin requests';
+    END IF;
+
+    IF v_requested_role = 'Staff' AND v_reviewer_role NOT IN ('Admin', 'SuperAdmin') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Only Admin or SuperAdmin can reject Staff requests';
+    END IF;
+
+    UPDATE staff_registration_requests
+    SET    status = 'Rejected',
+           reviewed_by = p_reviewer_id,
+           reviewed_at = CURRENT_TIMESTAMP,
+           reject_reason = p_reject_reason
+    WHERE  request_id = p_request_id;
+END //
+
+CREATE PROCEDURE get_customer_bookings (
+    IN p_user_id VARCHAR(20)
+)
+BEGIN
+    SELECT
+        b.booking_id,
+        b.user_id,
+        b.itinerary_id,
+        i.trip_type,
+        i.departure_airport_code,
+        i.arrival_airport_code,
+        b.booking_time,
+        b.status,
+        bs.flight_id,
+        bs.seat_number,
+        sch.flight_number,
+        f.flight_date,
+        sch.dep_airport,
+        sch.arr_airport,
+        sch.dep_time,
+        sch.arr_time,
+        al.airline_name,
+        sc.class_name,
+        p.payment_id,
+        p.amount,
+        p.payment_method,
+        p.status AS payment_status,
+        t.ticket_id,
+        COALESCE(r.refund_amount, 0) AS refund_amount
+    FROM bookings b
+    JOIN itineraries i ON b.itinerary_id = i.itinerary_id
+    LEFT JOIN booking_seats bs ON b.booking_id = bs.booking_id
+    LEFT JOIN flights f ON bs.flight_id = f.flight_id
+    LEFT JOIN flight_schedules sch ON f.schedule_id = sch.schedule_id
+    LEFT JOIN airlines al ON sch.airline_id = al.airline_id
+    LEFT JOIN flight_seats fls ON bs.flight_id = fls.flight_id AND bs.seat_number = fls.seat_number
+    LEFT JOIN seat_classes sc ON fls.class_id = sc.class_id
+    LEFT JOIN payments p ON b.booking_id = p.booking_id
+    LEFT JOIN tickets t ON b.booking_id = t.booking_id AND bs.flight_id = t.flight_id AND bs.seat_number = t.seat_number
+    LEFT JOIN refunds r ON b.booking_id = r.booking_id
+    WHERE b.user_id = p_user_id
+    ORDER BY b.booking_time DESC, b.booking_id DESC, bs.flight_id ASC;
+END //
+
+CREATE PROCEDURE get_all_bookings_for_staff()
+BEGIN
+    SELECT
+        b.booking_id,
+        b.user_id,
+        TRIM(CONCAT(
+            u.first_name,
+            ' ',
+            IFNULL(CONCAT(u.middle_name, ' '), ''),
+            u.last_name
+        )) AS customer_name,
+        u.email AS customer_email,
+        b.itinerary_id,
+        i.trip_type,
+        i.departure_airport_code,
+        i.arrival_airport_code,
+        b.booking_time,
+        b.status,
+        p.payment_id,
+        p.amount,
+        p.payment_method,
+        p.status AS payment_status,
+        p.payment_time,
+        COALESCE(rf.total_refund, 0) AS refund_amount,
+        rf.last_refund_time,
+        COALESCE(leg.leg_count, 0) AS leg_count,
+        leg.flights_summary
+    FROM bookings b
+    JOIN users u ON b.user_id = u.user_id
+    JOIN itineraries i ON b.itinerary_id = i.itinerary_id
+    LEFT JOIN payments p ON b.booking_id = p.booking_id
+    LEFT JOIN (
+        SELECT booking_id,
+               SUM(refund_amount) AS total_refund,
+               MAX(refund_time) AS last_refund_time
+        FROM refunds
+        GROUP BY booking_id
+    ) rf ON b.booking_id = rf.booking_id
+    LEFT JOIN (
+        SELECT bs.booking_id,
+               COUNT(DISTINCT bs.flight_id) AS leg_count,
+               GROUP_CONCAT(
+                   DISTINCT CONCAT(sch.flight_number, ' (', DATE_FORMAT(f.flight_date, '%Y-%m-%d'), ')')
+                   ORDER BY f.flight_id SEPARATOR ' · '
+               ) AS flights_summary
+        FROM booking_seats bs
+        JOIN flights f ON bs.flight_id = f.flight_id
+        JOIN flight_schedules sch ON f.schedule_id = sch.schedule_id
+        GROUP BY bs.booking_id
+    ) leg ON b.booking_id = leg.booking_id
+    ORDER BY b.booking_time DESC, b.booking_id DESC;
+END //
+
+CREATE PROCEDURE get_booking_legs_for_staff (
+    IN p_booking_id INT
+)
+BEGIN
+    SELECT
+        b.booking_id,
+        b.user_id,
+        TRIM(CONCAT(
+            u.first_name,
+            ' ',
+            IFNULL(CONCAT(u.middle_name, ' '), ''),
+            u.last_name
+        )) AS customer_name,
+        u.email AS customer_email,
+        b.itinerary_id,
+        i.trip_type,
+        i.departure_airport_code,
+        i.arrival_airport_code,
+        b.booking_time,
+        b.status,
+        bs.flight_id,
+        bs.seat_number,
+        sch.flight_number,
+        f.flight_date,
+        sch.dep_airport,
+        sch.arr_airport,
+        sch.dep_time,
+        sch.arr_time,
+        al.airline_name,
+        sc.class_name,
+        p.payment_id,
+        p.amount,
+        p.payment_method,
+        p.status AS payment_status,
+        p.payment_time,
+        t.ticket_id,
+        t.issue_time AS ticket_issue_time,
+        COALESCE(r.refund_amount, 0) AS refund_amount,
+        r.refund_time
+    FROM bookings b
+    JOIN users u ON b.user_id = u.user_id
+    JOIN itineraries i ON b.itinerary_id = i.itinerary_id
+    LEFT JOIN booking_seats bs ON b.booking_id = bs.booking_id
+    LEFT JOIN flights f ON bs.flight_id = f.flight_id
+    LEFT JOIN flight_schedules sch ON f.schedule_id = sch.schedule_id
+    LEFT JOIN airlines al ON sch.airline_id = al.airline_id
+    LEFT JOIN flight_seats fls ON bs.flight_id = fls.flight_id AND bs.seat_number = fls.seat_number
+    LEFT JOIN seat_classes sc ON fls.class_id = sc.class_id
+    LEFT JOIN payments p ON b.booking_id = p.booking_id
+    LEFT JOIN tickets t ON b.booking_id = t.booking_id AND bs.flight_id = t.flight_id AND bs.seat_number = t.seat_number
+    LEFT JOIN refunds r ON b.booking_id = r.booking_id
+    WHERE b.booking_id = p_booking_id
+    ORDER BY bs.flight_id ASC;
+END //
+
+CREATE PROCEDURE get_booking_activity_log (
+    IN p_booking_id INT
+)
+BEGIN
+    SELECT event_type, event_time, description, detail_status
+    FROM (
+        SELECT
+            'BOOKING_CREATED' AS event_type,
+            b.booking_time AS event_time,
+            CONCAT(
+                'Booking #', b.booking_id,
+                ' created for itinerary #', b.itinerary_id,
+                ' (', i.trip_type, ': ', i.departure_airport_code, ' → ', i.arrival_airport_code, ')'
+            ) AS description,
+            b.status AS detail_status
+        FROM bookings b
+        JOIN itineraries i ON b.itinerary_id = i.itinerary_id
+        WHERE b.booking_id = p_booking_id
+
+        UNION ALL
+
+        SELECT
+            'PAYMENT',
+            p.payment_time,
+            CONCAT(
+                'Payment #', p.payment_id,
+                ' · ', p.payment_method,
+                ' · $', FORMAT(p.amount, 2),
+                ' · ', p.status
+            ),
+            p.status
+        FROM payments p
+        WHERE p.booking_id = p_booking_id
+
+        UNION ALL
+
+        SELECT
+            'TICKET_ISSUED',
+            t.issue_time,
+            CONCAT(
+                'Ticket #', t.ticket_id,
+                ' · Flight ', t.flight_id,
+                ' · Seat ', t.seat_number
+            ),
+            'ISSUED'
+        FROM tickets t
+        WHERE t.booking_id = p_booking_id
+
+        UNION ALL
+
+        SELECT
+            'REFUND',
+            r.refund_time,
+            CONCAT(
+                'Refund #', r.refund_id,
+                ' · $', FORMAT(r.refund_amount, 2),
+                ' · Payment #', r.payment_id
+            ),
+            'REFUNDED'
+        FROM refunds r
+        WHERE r.booking_id = p_booking_id
+
+        UNION ALL
+
+        SELECT
+            'BOOKING_CANCELLED',
+            COALESCE(rf.last_refund_time, b.booking_time),
+            CONCAT('Booking #', b.booking_id, ' marked as Cancelled'),
+            b.status
+        FROM bookings b
+        LEFT JOIN (
+            SELECT booking_id, MAX(refund_time) AS last_refund_time
+            FROM refunds
+            WHERE booking_id = p_booking_id
+            GROUP BY booking_id
+        ) rf ON b.booking_id = rf.booking_id
+        WHERE b.booking_id = p_booking_id
+          AND b.status = 'Cancelled'
+    ) events
+    ORDER BY event_time ASC, event_type ASC;
+END //
+
+DELIMITER ;
+
+
+-- ============================================================
+-- OPERATION 6-F
+-- Staff: Quarterly Revenue Statistics
+-- ============================================================
+
+DELIMITER //
+
+CREATE PROCEDURE revenue_report_by_quarter()
+BEGIN
+    SELECT
+        fs.airline_id,
+        YEAR(f.flight_date)    AS revenue_year,
+        QUARTER(f.flight_date) AS revenue_quarter,
+        COUNT(DISTINCT t.ticket_id) AS tickets_sold,
+        COALESCE(SUM(fls.price), 0) AS quarterly_revenue
+    FROM flights f
+    JOIN flight_schedules fs ON f.schedule_id = fs.schedule_id
+    LEFT JOIN tickets t ON f.flight_id = t.flight_id
+    LEFT JOIN bookings b ON t.booking_id = b.booking_id AND b.status = 'Active'
+    LEFT JOIN payments p ON b.booking_id = p.booking_id AND p.status = 'SUCCESS'
+    LEFT JOIN flight_seats fls ON t.flight_id = fls.flight_id AND t.seat_number = fls.seat_number
+    WHERE b.booking_id IS NULL OR p.payment_id IS NOT NULL
+    GROUP BY fs.airline_id, YEAR(f.flight_date), QUARTER(f.flight_date)
+    ORDER BY revenue_year, revenue_quarter, fs.airline_id;
+END //
+
+DELIMITER ;
+
+
+-- ============================================================
+-- MASTER DATA CRUD (Staff)
+-- ============================================================
+
+DELIMITER //
+
+CREATE PROCEDURE upsert_airline (
+    IN p_airline_id   VARCHAR(10),
+    IN p_airline_name VARCHAR(100),
+    IN p_country      VARCHAR(50)
+)
+BEGIN
+    INSERT INTO airlines (airline_id, airline_name, country)
+    VALUES (p_airline_id, p_airline_name, p_country)
+    ON DUPLICATE KEY UPDATE
+        airline_name = VALUES(airline_name),
+        country = VALUES(country);
+END //
+
+CREATE PROCEDURE delete_airline (
+    IN p_airline_id VARCHAR(10)
+)
+BEGIN
+    DELETE FROM airlines WHERE airline_id = p_airline_id;
+END //
+
+CREATE PROCEDURE upsert_airport (
+    IN p_airport_code CHAR(3),
+    IN p_airport_name VARCHAR(100),
+    IN p_city         VARCHAR(50),
+    IN p_country      VARCHAR(50)
+)
+BEGIN
+    INSERT INTO airports (airport_code, airport_name, city, country)
+    VALUES (p_airport_code, p_airport_name, p_city, p_country)
+    ON DUPLICATE KEY UPDATE
+        airport_name = VALUES(airport_name),
+        city = VALUES(city),
+        country = VALUES(country);
+END //
+
+CREATE PROCEDURE delete_airport (
+    IN p_airport_code CHAR(3)
+)
+BEGIN
+    DELETE FROM airports WHERE airport_code = p_airport_code;
+END //
+
+CREATE PROCEDURE upsert_aircraft (
+    IN p_aircraft_id INT,
+    IN p_airline_id  VARCHAR(10),
+    IN p_model       VARCHAR(50),
+    IN p_capacity    INT
+)
+BEGIN
+    INSERT INTO aircraft (aircraft_id, airline_id, model, capacity)
+    VALUES (p_aircraft_id, p_airline_id, p_model, p_capacity)
+    ON DUPLICATE KEY UPDATE
+        airline_id = VALUES(airline_id),
+        model = VALUES(model),
+        capacity = VALUES(capacity);
+END //
+
+CREATE PROCEDURE upsert_flight_schedule (
+    IN p_schedule_id   INT,
+    IN p_airline_id    VARCHAR(10),
+    IN p_flight_number VARCHAR(10),
+    IN p_dep_airport   CHAR(3),
+    IN p_arr_airport   CHAR(3),
+    IN p_dep_time      TIME,
+    IN p_arr_time      TIME,
+    IN p_valid_from    DATE,
+    IN p_valid_to      DATE
+)
+BEGIN
+    INSERT INTO flight_schedules (
+        schedule_id, airline_id, flight_number,
+        dep_airport, arr_airport, dep_time, arr_time,
+        valid_from, valid_to
+    )
+    VALUES (
+        p_schedule_id, p_airline_id, p_flight_number,
+        p_dep_airport, p_arr_airport, p_dep_time, p_arr_time,
+        p_valid_from, p_valid_to
+    )
+    ON DUPLICATE KEY UPDATE
+        airline_id = VALUES(airline_id),
+        flight_number = VALUES(flight_number),
+        dep_airport = VALUES(dep_airport),
+        arr_airport = VALUES(arr_airport),
+        dep_time = VALUES(dep_time),
+        arr_time = VALUES(arr_time),
+        valid_from = VALUES(valid_from),
+        valid_to = VALUES(valid_to);
+END //
+
+CREATE PROCEDURE upsert_promotion (
+    IN p_promo_id         INT,
+    IN p_promo_code       VARCHAR(30),
+    IN p_description      VARCHAR(255),
+    IN p_schedule_id      INT,
+    IN p_dep_airport      CHAR(3),
+    IN p_arr_airport      CHAR(3),
+    IN p_class_id         INT,
+    IN p_discount_percent DECIMAL(5,2),
+    IN p_valid_from       DATE,
+    IN p_valid_to         DATE,
+    IN p_is_active        BOOLEAN
+)
+BEGIN
+    INSERT INTO promotions (
+        promo_id, promo_code, description,
+        schedule_id, dep_airport, arr_airport, class_id,
+        discount_percent, valid_from, valid_to, is_active
+    )
+    VALUES (
+        p_promo_id, p_promo_code, p_description,
+        p_schedule_id, p_dep_airport, p_arr_airport, p_class_id,
+        p_discount_percent, p_valid_from, p_valid_to, p_is_active
+    )
+    ON DUPLICATE KEY UPDATE
+        promo_code = VALUES(promo_code),
+        description = VALUES(description),
+        schedule_id = VALUES(schedule_id),
+        dep_airport = VALUES(dep_airport),
+        arr_airport = VALUES(arr_airport),
+        class_id = VALUES(class_id),
+        discount_percent = VALUES(discount_percent),
+        valid_from = VALUES(valid_from),
+        valid_to = VALUES(valid_to),
+        is_active = VALUES(is_active);
+END //
+
+CREATE PROCEDURE deactivate_promotion (
+    IN p_promo_id INT
+)
+BEGIN
+    UPDATE promotions SET is_active = FALSE WHERE promo_id = p_promo_id;
+END //
+
+DELIMITER ;
 
 
 -- ============================================================
