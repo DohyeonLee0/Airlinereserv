@@ -17,30 +17,13 @@ import FlightSearchWidget from "@/app/components/home/FlightSearchWidget";
 import PopularRouteCard from "@/app/components/home/PopularRouteCard";
 import Button from "@/app/components/ui/Button";
 import { cn } from "@/lib/cn";
-
-type RouteRow = {
-  route_type?: "DIRECT" | "ONE_STOP";
-  flight_id?: number;
-  first_flight_id?: number;
-  first_flight_number?: string;
-  second_flight_id?: number | null;
-  flight_number?: string;
-  second_flight_number?: string | null;
-  dep_airport: string;
-  arr_airport: string;
-  flight_date: string;
-  connection_airport?: string | null;
-  available_seats: number;
-  lowest_available_price?: number;
-  lowest_price?: number;
-  total_lowest_price?: number;
-  original_lowest_price?: number;
-  final_lowest_price?: number;
-  discount_percent?: number;
-  applied_promo_code?: string;
-  promo_description?: string;
-  recommendation_score?: number;
-};
+import {
+  flightIdsOf,
+  flightNumbersOf,
+  isConnectingRoute,
+  stopLabel,
+  type RouteRow
+} from "@/lib/routeSearch";
 
 type SearchTab = "basic" | "promotions" | "recommend";
 type ResultFilter = "direct" | "all" | "connections";
@@ -112,13 +95,13 @@ const STEPS = [
 
 function filterRoutes(routes: RouteRow[], filter: ResultFilter, isPromotionTab: boolean) {
   if (isPromotionTab) return routes;
-  if (filter === "direct") return routes.filter((row) => row.route_type !== "ONE_STOP");
-  if (filter === "connections") return routes.filter((row) => row.route_type === "ONE_STOP");
+  if (filter === "direct") return routes.filter((row) => !isConnectingRoute(row));
+  if (filter === "connections") return routes.filter((row) => isConnectingRoute(row));
   return routes;
 }
 
 function flightIdOf(row: RouteRow) {
-  return row.first_flight_id ?? row.flight_id ?? "";
+  return flightIdsOf(row)[0] ?? "";
 }
 
 export default function HomePage() {
@@ -342,11 +325,9 @@ export default function HomePage() {
                     badge={
                       deal.topRoute?.discount_percent
                         ? `-${deal.topRoute.discount_percent}%`
-                        : deal.topRoute?.route_type === "DIRECT"
-                          ? "Direct"
-                          : deal.topRoute
-                            ? "1 stop"
-                            : undefined
+                        : deal.topRoute
+                          ? stopLabel(deal.topRoute)
+                          : undefined
                     }
                     onSelect={() => pickDestination(deal.arr)}
                   />
@@ -397,8 +378,7 @@ export default function HomePage() {
                         <div>
                           <p className="font-semibold text-zinc-900">{routeLabel(row)}</p>
                           <p className="text-sm text-zinc-500">
-                            {row.first_flight_number ?? row.flight_number}
-                            {row.second_flight_number ? ` + ${row.second_flight_number}` : ""} · {row.available_seats} seats left
+                            {flightNumbersOf(row).join(" · ")} · {row.available_seats} seats left
                           </p>
                         </div>
                       </div>
@@ -494,9 +474,9 @@ export default function HomePage() {
                 ).map(([key, label]) => {
                   const count =
                     key === "direct"
-                      ? routes.filter((r) => r.route_type !== "ONE_STOP").length
+                      ? routes.filter((r) => !isConnectingRoute(r)).length
                       : key === "connections"
-                        ? routes.filter((r) => r.route_type === "ONE_STOP").length
+                        ? routes.filter((r) => isConnectingRoute(r)).length
                         : routes.length;
                   return (
                     <button

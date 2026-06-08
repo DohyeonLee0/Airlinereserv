@@ -1,49 +1,19 @@
 import Link from "next/link";
 import { Plane, Tag } from "lucide-react";
 import { cn } from "@/lib/cn";
-
-type RouteRow = {
-  route_type?: "DIRECT" | "ONE_STOP";
-  flight_id?: number;
-  first_flight_id?: number;
-  first_flight_number?: string;
-  second_flight_id?: number | null;
-  flight_number?: string;
-  second_flight_number?: string | null;
-  dep_airport: string;
-  arr_airport: string;
-  connection_airport?: string | null;
-  available_seats: number;
-  lowest_available_price?: number;
-  lowest_price?: number;
-  total_lowest_price?: number;
-  original_lowest_price?: number;
-  final_lowest_price?: number;
-  discount_percent?: number;
-  applied_promo_code?: string;
-  promo_description?: string;
-  recommendation_score?: number;
-};
-
-function priceOf(row: RouteRow) {
-  return row.final_lowest_price ?? row.total_lowest_price ?? row.lowest_price ?? row.lowest_available_price ?? 0;
-}
-
-function routeLabel(row: RouteRow) {
-  return `${row.dep_airport} → ${row.connection_airport ? `${row.connection_airport} → ` : ""}${row.arr_airport}`;
-}
-
-function seatHref(row: RouteRow) {
-  const first = row.first_flight_id ?? row.flight_id;
-  if (row.route_type === "ONE_STOP" && first && row.second_flight_id) {
-    return `/seats?flight_ids=${first},${row.second_flight_id}`;
-  }
-  return `/seats?flight_id=${first ?? ""}`;
-}
+import {
+  flightIdsOf,
+  flightNumbersOf,
+  priceOf,
+  routeLabel,
+  seatHref,
+  stopLabel,
+  type RouteRow
+} from "@/lib/routeSearch";
 
 export default function FlightResultCard({ row, index }: { row: RouteRow; index: number }) {
   const isDeal = Boolean(row.applied_promo_code || row.discount_percent);
-  const isDirect = row.route_type !== "ONE_STOP";
+  const flightNumbers = flightNumbersOf(row);
 
   return (
     <article
@@ -66,10 +36,8 @@ export default function FlightResultCard({ row, index }: { row: RouteRow; index:
                   <Tag className="size-3" strokeWidth={1.75} />
                   {row.applied_promo_code}
                 </>
-              ) : isDirect ? (
-                "Direct"
               ) : (
-                "1 stop"
+                stopLabel(row)
               )}
             </span>
             {index === 0 ? (
@@ -80,9 +48,11 @@ export default function FlightResultCard({ row, index }: { row: RouteRow; index:
           <h3 className="mt-3 text-xl font-semibold tracking-tight text-zinc-900">{routeLabel(row)}</h3>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-zinc-500">
             <Plane className="size-3.5 shrink-0" strokeWidth={1.75} />
-            {row.first_flight_number ?? row.flight_number}
-            {row.second_flight_number ? ` · ${row.second_flight_number}` : ""}
+            {flightNumbers.join(" · ")}
           </p>
+          {flightIdsOf(row).length > 1 ? (
+            <p className="mt-1 text-xs text-zinc-400">{flightIdsOf(row).length} legs · select a seat for each</p>
+          ) : null}
           {row.promo_description ? <p className="mt-2 text-[15px] text-emerald-700">{row.promo_description}</p> : null}
           {row.recommendation_score !== undefined ? (
             <p className="mt-2 text-xs font-semibold text-cerulean-700">Smart score · {row.recommendation_score}</p>

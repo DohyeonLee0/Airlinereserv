@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
+import { isConnectingRoute, normalizeRouteRows } from "@/lib/routeSearch";
 import { badRequest, conflict, created, dbErrorMessage, forbidden, isConflictDbError, ok, readJson, requiredParams, serverError, unauthorized } from "./http";
 
 type SearchMode = "basic" | "advanced" | "promotions" | "connecting";
@@ -34,7 +35,7 @@ async function searchPromotions(request: NextRequest) {
       nullableNumber(parsed.values.get("max_price")),
       promoCode
     ]);
-    return ok({ mode: "promotions", promoCode, routes: rows });
+    return ok({ mode: "promotions", promoCode, routes: normalizeRouteRows(rows) });
   } catch (error) {
     return serverError(error);
   }
@@ -57,12 +58,12 @@ async function runSearch(request: NextRequest, mode: SearchMode) {
   } satisfies Record<Exclude<SearchMode, "promotions">, { sql: string; params: unknown[] }>;
 
   try {
-    const rows = await callProcedure(map[mode].sql, map[mode].params);
+    const rows = normalizeRouteRows(await callProcedure(map[mode].sql, map[mode].params));
     return ok({
       mode,
       routes: rows,
       direct: rows.filter((row) => row.route_type === "DIRECT"),
-      oneStop: rows.filter((row) => row.route_type === "ONE_STOP")
+      connecting: rows.filter((row) => isConnectingRoute(row))
     });
   } catch (error) {
     return serverError(error);
@@ -94,12 +95,14 @@ export async function recommendRoutes(request: NextRequest) {
   if (parsed.error || !parsed.values) return parsed.error;
 
   try {
-    const rows = await callProcedure("CALL recommend_routes(?, ?, ?, ?)", [
-      parsed.values.get("dep_airport"),
-      parsed.values.get("arr_airport"),
-      parsed.values.get("flight_date"),
-      nullableNumber(parsed.values.get("class_id")) ?? classIdFromQuery(null, parsed.values.get("class_name"))
-    ]);
+    const rows = normalizeRouteRows(
+      await callProcedure("CALL recommend_routes(?, ?, ?, ?)", [
+        parsed.values.get("dep_airport"),
+        parsed.values.get("arr_airport"),
+        parsed.values.get("flight_date"),
+        nullableNumber(parsed.values.get("class_id")) ?? classIdFromQuery(null, parsed.values.get("class_name"))
+      ])
+    );
     return ok({ routes: rows.slice(0, 5) });
   } catch (error) {
     return serverError(error);
