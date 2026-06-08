@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { RowDataPacket } from "mysql2/promise";
+import { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
 import { isStaffRole } from "@/lib/roles";
@@ -21,6 +21,160 @@ type KpiRow = RowDataPacket & {
   active_customers: number;
   avg_load_factor: number;
 };
+
+const WEEKDAY_NAMES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] as const;
+
+function addDaysIso(date: string, days: number) {
+  const next = new Date(`${date}T00:00:00`);
+  next.setDate(next.getDate() + days);
+  return next.toISOString().slice(0, 10);
+}
+
+function parseScheduleIds(value: unknown): number[] {
+  if (!value) return [];
+  try {
+    const raw = typeof value === "string" ? JSON.parse(value) : value;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
+  } catch {
+    return [];
+  }
+}
+
+export async function generateConnectingFlights(request: NextRequest) {
+  const session = await requireStaffSession();
+  if (session.error) return session.error;
+
+  const body = await readJson(request);
+  const bodyLegs = Array.isArray(body.legs) ? body.legs : [];
+  const required = ["itinerary_id", "start_date", "end_date"];
+  const missing = required.filter((key) => body[key] === undefined || body[key] === "");
+  if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
+
+  const itineraryId = Number(body.itinerary_id);
+  const startDate = String(body.start_date);
+  const endDate = String(body.end_date);
+  if (startDate > endDate) return badRequest("Start date must be on or before end date.");
+
+  const connection = await getPool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [itineraryRows] = await connection.query<
+      Array<RowDataPacket & { trip_type: string; leg_schedule_ids: unknown }>
+    >("SELECT trip_type, leg_schedule_ids FROM itineraries WHERE itinerary_id = ?", [itineraryId]);
+
+    if (!itineraryRows[0] || itineraryRows[0].trip_type !== "Connecting") {
+      await connection.rollback();
+      return badRequest("Save the connecting route before generating dated flights.");
+    }
+
+    const scheduleIds = parseScheduleIds(itineraryRows[0].leg_schedule_ids);
+    if (scheduleIds.length < 2) {
+      await connection.rollback();
+      return badRequest(
+        "This itinerary has no linked schedule legs. Save the connecting route again, then retry."
+      );
+    }
+
+    const aircraftBySchedule = new Map<number, number>();
+    for (let index = 0; index < bodyLegs.length; index += 1) {
+      const leg = bodyLegs[index] as { schedule_id?: number; aircraft_id?: number };
+      if (!leg.aircraft_id) {
+        await connection.rollback();
+        return badRequest(`Leg ${index + 1} requires an aircraft.`);
+      }
+      if (leg.schedule_id) {
+        aircraftBySchedule.set(Number(leg.schedule_id), Number(leg.aircraft_id));
+      }
+    }
+
+    const legs: Array<{ schedule_id: number; aircraft_id: number }> = [];
+    for (let index = 0; index < scheduleIds.length; index += 1) {
+      const scheduleId = scheduleIds[index];
+      const bodyLeg = bodyLegs[index] as { schedule_id?: number; aircraft_id?: number } | undefined;
+      const aircraftId =
+        aircraftBySchedule.get(scheduleId) ??
+        (bodyLeg?.schedule_id && Number(bodyLeg.schedule_id) === scheduleId
+          ? Number(bodyLeg.aircraft_id)
+          : Number(bodyLeg?.aircraft_id ?? 0));
+
+      if (!aircraftId) {
+        await connection.rollback();
+        return badRequest(`Leg ${index + 1} requires an aircraft.`);
+      }
+
+      legs.push({ schedule_id: scheduleId, aircraft_id: aircraftId });
+    }
+
+    const [maxFlightRows] = await connection.query<RowDataPacket[]>(
+      "SELECT COALESCE(MAX(flight_id), 0) AS max_id FROM flights FOR UPDATE"
+    );
+    let nextFlightId = Number(maxFlightRows[0]?.max_id ?? 0) + 1;
+    let generated = 0;
+    let candidateDays = 0;
+
+    for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
+      const dayName = WEEKDAY_NAMES[new Date(`${currentDate}T00:00:00`).getDay()];
+
+      const operatingChecks = await Promise.all(
+        legs.map(async (leg) => {
+          const [rows] = await connection.query<RowDataPacket[]>(
+            "SELECT 1 FROM schedule_days WHERE schedule_id = ? AND day_of_week = ? LIMIT 1",
+            [leg.schedule_id, dayName]
+          );
+          return rows.length > 0;
+        })
+      );
+
+      if (!operatingChecks.every(Boolean)) continue;
+      candidateDays += 1;
+
+      for (let segmentOrder = 0; segmentOrder < legs.length; segmentOrder += 1) {
+        const leg = legs[segmentOrder];
+        const [insertResult] = await connection.query<ResultSetHeader>(
+          `INSERT IGNORE INTO flights (
+             flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status
+           ) VALUES (?, ?, ?, ?, ?, ?, 'Outbound', 'Scheduled')`,
+          [
+            nextFlightId,
+            itineraryId,
+            leg.schedule_id,
+            currentDate,
+            leg.aircraft_id,
+            segmentOrder + 1
+          ]
+        );
+
+        if (insertResult.affectedRows > 0) {
+          generated += 1;
+        }
+        nextFlightId += 1;
+      }
+    }
+
+    if (generated === 0) {
+      await connection.rollback();
+      if (candidateDays === 0) {
+        return badRequest(
+          "No flights were created. The selected date range has no days matching this route's operating days (default MON/WED/FRI)."
+        );
+      }
+      return badRequest(
+        "No new flights were created. Flights may already exist for those dates, or the schedule is already in use on the same day."
+      );
+    }
+
+    await connection.commit();
+    return created({ itinerary_id: itineraryId, generated_flights: generated });
+  } catch (error) {
+    await connection.rollback();
+    return serverError(error);
+  } finally {
+    connection.release();
+  }
+}
 
 export async function generateFlights(request: NextRequest) {
   const body = await readJson(request);
