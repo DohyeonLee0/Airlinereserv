@@ -10,7 +10,18 @@ import {
   RegistrationSuccessModal,
   type RegistrationSuccessDetail
 } from "@/app/components/dashboard/master/RegistrationSuccessModal";
-import { StaffMessage, useStaffAction } from "@/app/components/dashboard/useStaffAction";
+import {
+  GenerateDatedFlightsPanel,
+  type FlightGeneratePricing
+} from "@/app/components/dashboard/master/GenerateDatedFlightsPanel";
+import {
+  EMPTY_SCHEDULE_BROWSE_FILTERS,
+  filterConnectingItineraryRow,
+  filterScheduleLegRow,
+  ScheduleBrowseFiltersBar,
+  type ScheduleBrowseFilters
+} from "@/app/components/dashboard/master/ScheduleBrowseFilters";
+import { StaffAlertModal, useStaffAction } from "@/app/components/dashboard/useStaffAction";
 import { generateFlightNumber } from "@/lib/flightNumber";
 import { normalizeTime24 } from "@/lib/formatDate";
 import { nextNumericId } from "@/lib/masterDataOptions";
@@ -19,6 +30,14 @@ import { cn } from "@/lib/cn";
 const formCardClass = "rounded-2xl border border-zinc-200/80 bg-white p-5 shadow-sm";
 const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"] as const;
 const DEFAULT_OPERATING_DAYS = ["MON", "WED", "FRI"];
+
+const DEFAULT_GENERATE_PRICING: FlightGeneratePricing = {
+  start_date: "2026-06-01",
+  end_date: "2026-06-30",
+  economy_price: "780",
+  business_price: "2400",
+  first_price: "5200"
+};
 
 type ScheduleMode = "direct" | "connecting";
 
@@ -41,6 +60,61 @@ type ConnectingItineraryRow = {
   leg_summary: string | null;
   schedule_leg_count: number;
   generated_leg_count: number;
+  leg_schedule_ids?: number[] | string | null;
+  operating_days?: string[] | string | null;
+};
+
+function parseOperatingDays(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    const days = value
+      .map((day) => String(day).trim().toUpperCase())
+      .filter((day) => WEEKDAYS.includes(day as (typeof WEEKDAYS)[number]));
+    return days.length ? days : [...DEFAULT_OPERATING_DAYS];
+  }
+  if (typeof value === "string") {
+    try {
+      return parseOperatingDays(JSON.parse(value));
+    } catch {
+      return [...DEFAULT_OPERATING_DAYS];
+    }
+  }
+  if (value && typeof value === "object") {
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+      try {
+        return parseOperatingDays(JSON.parse(value.toString("utf8")));
+      } catch {
+        return [...DEFAULT_OPERATING_DAYS];
+      }
+    }
+    const objectValues = Object.values(value as Record<string, unknown>);
+    if (objectValues.length) {
+      return parseOperatingDays(objectValues);
+    }
+  }
+  return [...DEFAULT_OPERATING_DAYS];
+}
+
+type ConnectingItineraryDetailLeg = {
+  schedule_id: number;
+  airline_id: string;
+  flight_number: string;
+  dep_airport: string;
+  arr_airport: string;
+  dep_time: string;
+  arr_time: string;
+  valid_from: string;
+  valid_to: string;
+  leg_index: number;
+};
+
+type ConnectingItineraryDetail = {
+  itinerary: {
+    itinerary_id: number;
+    departure_airport_code: string;
+    arrival_airport_code: string;
+  };
+  legs: ConnectingItineraryDetailLeg[];
+  operating_days: string[];
 };
 
 function buildConnectingRouteLabel(legs: LegForm[]) {
@@ -100,6 +174,8 @@ function layoverMinutes(previousArrTime: string, nextDepTime: string) {
   return toMinutes(nextDepTime) - toMinutes(previousArrTime);
 }
 
+const SCHEDULES_TABLE_PAGE_SIZE = 15;
+
 export default function SchedulesMasterPage() {
   const { airlines, airports, aircraft, schedules, loading, error, reload } = useMasterLists({
     airlines: true,
@@ -112,13 +188,15 @@ export default function SchedulesMasterPage() {
     await loadConnectingItineraries();
   }
 
-  const { message, postJson, deleteJson, setMessage } = useStaffAction(refreshMasterData);
+  const { alert, showAlert, clearAlert, postJson, deleteJson } = useStaffAction(refreshMasterData);
   const [successDetail, setSuccessDetail] = useState<RegistrationSuccessDetail | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isLoadingItinerary, setIsLoadingItinerary] = useState(false);
   const [mode, setMode] = useState<ScheduleMode>("direct");
   const [connectingItineraries, setConnectingItineraries] = useState<ConnectingItineraryRow[]>([]);
   const [selectedDirectKey, setSelectedDirectKey] = useState<string | null>(null);
   const [selectedItineraryKey, setSelectedItineraryKey] = useState<string | null>(null);
+  const [browseFilters, setBrowseFilters] = useState<ScheduleBrowseFilters>({ ...EMPTY_SCHEDULE_BROWSE_FILTERS });
   const [directForm, setDirectForm] = useState({
     schedule_id: "",
     airline_id: "",
@@ -128,16 +206,16 @@ export default function SchedulesMasterPage() {
     dep_time: "09:00",
     arr_time: "12:00",
     valid_from: "2026-06-01",
-    valid_to: "2026-06-30"
+    valid_to: "2026-06-30",
+    operating_days: [...DEFAULT_OPERATING_DAYS] as string[]
   });
+  const [flightGenerate, setFlightGenerate] = useState<FlightGeneratePricing>({ ...DEFAULT_GENERATE_PRICING });
   const [connectingForm, setConnectingForm] = useState({
     itinerary_id: "",
     departure_airport_code: "ICN",
     arrival_airport_code: "JFK",
     valid_from: "2026-06-01",
     valid_to: "2026-06-30",
-    start_date: "2026-06-01",
-    end_date: "2026-06-30",
     operating_days: [...DEFAULT_OPERATING_DAYS],
     legs: [
       createLeg(1, "ICN", "LAX", "", "101", "2026-06-01", 1),
@@ -155,11 +233,11 @@ export default function SchedulesMasterPage() {
 
   useEffect(() => {
     void loadConnectingItineraries();
-  }, [message, schedules.length]);
+  }, [schedules.length]);
 
   useEffect(() => {
-    setMessage("");
-  }, [selectedDirectKey, selectedItineraryKey, mode, setMessage]);
+    clearAlert();
+  }, [selectedDirectKey, selectedItineraryKey, mode, clearAlert]);
 
   useEffect(() => {
     if (!selectedDirectKey && schedules.length && !directForm.schedule_id) {
@@ -207,7 +285,8 @@ export default function SchedulesMasterPage() {
       dep_time: "09:00",
       arr_time: "12:00",
       valid_from: "2026-06-01",
-      valid_to: "2026-06-30"
+      valid_to: "2026-06-30",
+      operating_days: [...DEFAULT_OPERATING_DAYS]
     });
   }
 
@@ -227,8 +306,6 @@ export default function SchedulesMasterPage() {
       arrival_airport_code: destination,
       valid_from: "2026-06-01",
       valid_to: "2026-06-30",
-      start_date: "2026-06-01",
-      end_date: "2026-06-30",
       operating_days: [...DEFAULT_OPERATING_DAYS],
       legs: [
         createLeg(baseScheduleId, origin, hub, airlineId, String(aircraft[0]?.aircraft_id ?? 101), "2026-06-01", 1),
@@ -237,10 +314,73 @@ export default function SchedulesMasterPage() {
     });
   }
 
+  function applyItineraryDetail(detail: ConnectingItineraryDetail) {
+    const { itinerary, legs } = detail;
+    const operatingDays = parseOperatingDays(detail.operating_days);
+    const first = legs[0];
+    const validFrom = first ? String(first.valid_from).slice(0, 10) : connectingForm.valid_from;
+    const validTo = first ? String(first.valid_to).slice(0, 10) : connectingForm.valid_to;
+
+    setConnectingForm({
+      itinerary_id: String(itinerary.itinerary_id),
+      departure_airport_code: itinerary.departure_airport_code,
+      arrival_airport_code: itinerary.arrival_airport_code,
+      valid_from: validFrom,
+      valid_to: validTo,
+      operating_days: operatingDays,
+      legs: legs.length
+        ? legs.map((leg) => ({
+            schedule_id: String(leg.schedule_id),
+            airline_id: leg.airline_id,
+            flight_number: leg.flight_number,
+            dep_airport: leg.dep_airport,
+            arr_airport: leg.arr_airport,
+            dep_time: formatTimeValue(leg.dep_time),
+            arr_time: formatTimeValue(leg.arr_time),
+            aircraft_id: String(aircraft[0]?.aircraft_id ?? 101)
+          }))
+        : connectingForm.legs
+    });
+  }
+
+  async function loadItineraryFromDb(itineraryId: number) {
+    const response = await fetch(`/api/staff/master/itineraries/connecting/${itineraryId}`);
+    const json = await response.json();
+    if (!response.ok) {
+      showAlert(json.message ?? "Failed to load itinerary from the database.", { title: "Load failed" });
+      return null;
+    }
+    const detail = json.data as ConnectingItineraryDetail;
+    applyItineraryDetail(detail);
+    const firstLeg = detail.legs[0];
+    const validFrom = firstLeg ? String(firstLeg.valid_from).slice(0, 10) : flightGenerate.start_date;
+    const validTo = firstLeg ? String(firstLeg.valid_to).slice(0, 10) : flightGenerate.end_date;
+    setFlightGenerate((prev) => ({
+      ...prev,
+      start_date: validFrom,
+      end_date: validTo
+    }));
+    return detail;
+  }
+
+  async function loadItineraryIntoForm(row: ConnectingItineraryRow) {
+    setSelectedItineraryKey(String(row.itinerary_id));
+    setSelectedDirectKey(null);
+    setMode("connecting");
+    setIsLoadingItinerary(true);
+    try {
+      await loadItineraryFromDb(row.itinerary_id);
+    } finally {
+      setIsLoadingItinerary(false);
+    }
+  }
+
   function editDirectRow(row: ScheduleRow) {
     setMode("direct");
     setSelectedDirectKey(String(row.schedule_id));
     setSelectedItineraryKey(null);
+    const validFrom = String(row.valid_from).slice(0, 10);
+    const validTo = String(row.valid_to).slice(0, 10);
     setDirectForm({
       schedule_id: String(row.schedule_id),
       airline_id: row.airline_id,
@@ -249,9 +389,15 @@ export default function SchedulesMasterPage() {
       arr_airport: row.arr_airport,
       dep_time: formatTimeValue(row.dep_time),
       arr_time: formatTimeValue(row.arr_time),
-      valid_from: String(row.valid_from).slice(0, 10),
-      valid_to: String(row.valid_to).slice(0, 10)
+      valid_from: validFrom,
+      valid_to: validTo,
+      operating_days: parseOperatingDays(row.operating_days)
     });
+    setFlightGenerate((prev) => ({
+      ...prev,
+      start_date: validFrom,
+      end_date: validTo
+    }));
   }
 
   function updateLeg(index: number, patch: Partial<LegForm>) {
@@ -344,13 +490,26 @@ export default function SchedulesMasterPage() {
     });
   }
 
-  function toggleOperatingDay(day: (typeof WEEKDAYS)[number]) {
+  function toggleOperatingDay(day: (typeof WEEKDAYS)[number], target: ScheduleMode) {
+    if (target === "direct") {
+      setDirectForm((prev) => ({
+        ...prev,
+        operating_days: prev.operating_days.includes(day)
+          ? prev.operating_days.filter((value) => value !== day)
+          : [...prev.operating_days, day]
+      }));
+      return;
+    }
     setConnectingForm((prev) => ({
       ...prev,
       operating_days: prev.operating_days.includes(day)
         ? prev.operating_days.filter((value) => value !== day)
         : [...prev.operating_days, day]
     }));
+  }
+
+  function patchFlightGenerate(patch: Partial<FlightGeneratePricing>) {
+    setFlightGenerate((prev) => ({ ...prev, ...patch }));
   }
 
   const directFlightNumber = useMemo(() => {
@@ -405,20 +564,26 @@ export default function SchedulesMasterPage() {
 
   async function handleDirectSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const result = await postJson("/api/staff/master/schedules", {
-      schedule_id: Number(directForm.schedule_id),
-      airline_id: directForm.airline_id,
-      flight_number: directFlightNumber,
-      dep_airport: directForm.dep_airport,
-      arr_airport: directForm.arr_airport,
-      dep_time: toSqlTime(directForm.dep_time),
-      arr_time: toSqlTime(directForm.arr_time),
-      valid_from: directForm.valid_from,
-      valid_to: directForm.valid_to
-    });
+    const result = await postJson(
+      "/api/staff/master/schedules",
+      {
+        schedule_id: Number(directForm.schedule_id),
+        airline_id: directForm.airline_id,
+        flight_number: directFlightNumber,
+        dep_airport: directForm.dep_airport,
+        arr_airport: directForm.arr_airport,
+        dep_time: toSqlTime(directForm.dep_time),
+        arr_time: toSqlTime(directForm.arr_time),
+        valid_from: directForm.valid_from,
+        valid_to: directForm.valid_to,
+        operating_days: directForm.operating_days
+      },
+      "POST",
+      { silentSuccess: true }
+    );
     if (!result.ok) return;
-
-    setMessage("");
+    setSelectedDirectKey(String(directForm.schedule_id));
+    setMode("direct");
     setSuccessDetail({
       kind: "direct",
       schedule_id: directForm.schedule_id,
@@ -431,9 +596,15 @@ export default function SchedulesMasterPage() {
       dep_time: directForm.dep_time,
       arr_time: directForm.arr_time,
       valid_from: directForm.valid_from,
-      valid_to: directForm.valid_to
+      valid_to: directForm.valid_to,
+      operating_days: [...directForm.operating_days]
     });
-    startNewDirect();
+    setFlightGenerate((prev) => ({
+      ...prev,
+      start_date: directForm.valid_from,
+      end_date: directForm.valid_to
+    }));
+    await refreshMasterData();
   }
 
   async function handleConnectingSubmit(e: React.FormEvent) {
@@ -442,11 +613,14 @@ export default function SchedulesMasterPage() {
     for (let index = 0; index < connectingLegsPrepared.length; index += 1) {
       const leg = connectingLegsPrepared[index];
       if (!leg.airline_id) {
-        setMessage(`Leg ${index + 1}: select an airline.`);
+        showAlert(`Leg ${index + 1}: select an airline.`, { title: "Missing airline", variant: "warning" });
         return;
       }
       if (!leg.flight_number) {
-        setMessage(`Leg ${index + 1}: flight number could not be generated.`);
+        showAlert(`Leg ${index + 1}: flight number could not be generated.`, {
+          title: "Missing flight number",
+          variant: "warning"
+        });
         return;
       }
     }
@@ -455,11 +629,17 @@ export default function SchedulesMasterPage() {
       const current = connectingLegsPrepared[index];
       const next = connectingLegsPrepared[index + 1];
       if (current.arr_airport !== next.dep_airport) {
-        setMessage(`Leg ${index + 1} must arrive where leg ${index + 2} departs.`);
+        showAlert(`Leg ${index + 1} must arrive where leg ${index + 2} departs.`, {
+          title: "Invalid connection",
+          variant: "warning"
+        });
         return;
       }
       if (layoverMinutes(current.arr_time, next.dep_time) < 60) {
-        setMessage(`Layover between leg ${index + 1} and leg ${index + 2} must be at least 1 hour.`);
+        showAlert(`Layover between leg ${index + 1} and leg ${index + 2} must be at least 1 hour.`, {
+          title: "Layover too short",
+          variant: "warning"
+        });
         return;
       }
     }
@@ -467,26 +647,29 @@ export default function SchedulesMasterPage() {
     const legDetails = buildConnectingLegDetails(connectingLegsPrepared);
     const routeLabel = buildConnectingRouteLabel(connectingLegsPrepared);
 
-    const result = await postJson("/api/staff/master/schedules/connecting-route", {
-      itinerary_id: Number(connectingForm.itinerary_id),
-      departure_airport_code: connectingForm.departure_airport_code,
-      arrival_airport_code: connectingForm.arrival_airport_code,
-      valid_from: connectingForm.valid_from,
-      valid_to: connectingForm.valid_to,
-      operating_days: connectingForm.operating_days,
-      legs: connectingLegsPrepared.map((leg) => ({
-        schedule_id: Number(leg.schedule_id),
-        airline_id: leg.airline_id,
-        flight_number: leg.flight_number,
-        dep_airport: leg.dep_airport,
-        arr_airport: leg.arr_airport,
-        dep_time: toSqlTime(leg.dep_time),
-        arr_time: toSqlTime(leg.arr_time)
-      }))
-    });
+    const result = await postJson(
+      "/api/staff/master/schedules/connecting-route",
+      {
+        itinerary_id: Number(connectingForm.itinerary_id),
+        departure_airport_code: connectingForm.departure_airport_code,
+        arrival_airport_code: connectingForm.arrival_airport_code,
+        valid_from: connectingForm.valid_from,
+        valid_to: connectingForm.valid_to,
+        operating_days: connectingForm.operating_days,
+        legs: connectingLegsPrepared.map((leg) => ({
+          schedule_id: Number(leg.schedule_id),
+          airline_id: leg.airline_id,
+          flight_number: leg.flight_number,
+          dep_airport: leg.dep_airport,
+          arr_airport: leg.arr_airport,
+          dep_time: toSqlTime(leg.dep_time),
+          arr_time: toSqlTime(leg.arr_time)
+        }))
+      },
+      "POST",
+      { silentSuccess: true }
+    );
     if (!result.ok) return;
-
-    setMessage("");
     setSuccessDetail({
       kind: "connecting",
       itinerary_id: Number(connectingForm.itinerary_id),
@@ -499,7 +682,10 @@ export default function SchedulesMasterPage() {
       legs: legDetails
     });
     await loadConnectingItineraries();
-    startNewConnecting();
+    await reload();
+    setSelectedItineraryKey(String(connectingForm.itinerary_id));
+    setMode("connecting");
+    await loadItineraryFromDb(Number(connectingForm.itinerary_id));
   }
 
   async function handleDeleteItinerary(row: ConnectingItineraryRow) {
@@ -517,27 +703,105 @@ export default function SchedulesMasterPage() {
     }
   }
 
+  async function generateDirectFlights() {
+    const scheduleId = Number(directForm.schedule_id);
+    if (!directForm.schedule_id) {
+      showAlert("Enter a schedule ID.", { title: "Missing schedule", variant: "warning" });
+      return;
+    }
+    if (!flightGenerate.start_date || !flightGenerate.end_date) {
+      showAlert("Choose a start and end date.", { title: "Missing dates", variant: "warning" });
+      return;
+    }
+    if (flightGenerate.start_date > flightGenerate.end_date) {
+      showAlert("Start date must be on or before end date.", { title: "Invalid date range", variant: "warning" });
+      return;
+    }
+    const savedSchedule = schedules.find((row) => row.schedule_id === scheduleId);
+    if (!savedSchedule) {
+      showAlert("Save the direct schedule first, then generate dated flights.", {
+        title: "Schedule not saved",
+        variant: "warning"
+      });
+      return;
+    }
+
+    const routeLabel = `${directForm.dep_airport} → ${directForm.arr_airport}`;
+
+    setIsGenerating(true);
+    clearAlert();
+    try {
+      const result = await postJson(
+        "/api/staff/flights/generate-direct",
+        {
+          schedule_id: scheduleId,
+          aircraft_id: Number(directForm.aircraft_id),
+          start_date: flightGenerate.start_date,
+          end_date: flightGenerate.end_date,
+          economy_price: Number(flightGenerate.economy_price),
+          business_price: Number(flightGenerate.business_price),
+          first_price: Number(flightGenerate.first_price)
+        },
+        "POST",
+        { silentSuccess: true }
+      );
+      if (!result.ok) return;
+
+      const generatedFlights = Number(
+        (result.data as { generated_flights?: number } | undefined)?.generated_flights ?? 0
+      );
+      if (generatedFlights <= 0) {
+        showAlert("No flights were created. Check operating days and whether flights already exist for those dates.", {
+          title: "No flights created"
+        });
+        return;
+      }
+
+      setSuccessDetail({
+        kind: "generated",
+        route_type: "direct",
+        schedule_id: scheduleId,
+        route_label: routeLabel,
+        flight_number: directFlightNumber || savedSchedule.flight_number,
+        start_date: flightGenerate.start_date,
+        end_date: flightGenerate.end_date,
+        generated_flights: generatedFlights
+      });
+      await refreshMasterData();
+    } catch {
+      showAlert("Flight generation timed out or failed. Please try again.", { title: "Generation failed" });
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
   async function generateConnectingFlights() {
     const itineraryId = Number(connectingForm.itinerary_id);
     if (!connectingForm.itinerary_id) {
-      setMessage("Enter an itinerary ID.");
+      showAlert("Enter an itinerary ID.", { title: "Missing itinerary", variant: "warning" });
       return;
     }
-    if (!connectingForm.start_date || !connectingForm.end_date) {
-      setMessage("Choose a start and end date.");
+    if (!flightGenerate.start_date || !flightGenerate.end_date) {
+      showAlert("Choose a start and end date.", { title: "Missing dates", variant: "warning" });
       return;
     }
-    if (connectingForm.start_date > connectingForm.end_date) {
-      setMessage("Start date must be on or before end date.");
+    if (flightGenerate.start_date > flightGenerate.end_date) {
+      showAlert("Start date must be on or before end date.", { title: "Invalid date range", variant: "warning" });
       return;
     }
     const savedRoute = connectingItineraries.find((row) => row.itinerary_id === itineraryId);
     if (!savedRoute) {
-      setMessage("Save the connecting route first, then generate dated flights.");
+      showAlert("Save the connecting itinerary first, then generate dated flights.", {
+        title: "Route not saved",
+        variant: "warning"
+      });
       return;
     }
     if ((savedRoute.schedule_leg_count ?? 0) < 2) {
-      setMessage("This itinerary has no saved legs. Save the connecting route again, then retry.");
+      showAlert("This itinerary has no saved legs. Save the connecting itinerary again, then retry.", {
+        title: "Missing legs",
+        variant: "warning"
+      });
       return;
     }
 
@@ -546,41 +810,77 @@ export default function SchedulesMasterPage() {
       savedRoute.route_label ?? buildConnectingRouteLabel(connectingLegsPrepared) ?? `${savedRoute.departure_airport_code} → ${savedRoute.arrival_airport_code}`;
 
     setIsGenerating(true);
+    clearAlert();
     try {
-      const result = await postJson("/api/staff/flights/generate-connecting", {
-        itinerary_id: itineraryId,
-        start_date: connectingForm.start_date,
-        end_date: connectingForm.end_date,
-        legs: connectingLegsPrepared.map((leg) => ({
-          schedule_id: Number(leg.schedule_id),
-          aircraft_id: Number(leg.aircraft_id)
-        }))
-      });
+      const result = await postJson(
+        "/api/staff/flights/generate-connecting",
+        {
+          itinerary_id: itineraryId,
+          start_date: flightGenerate.start_date,
+          end_date: flightGenerate.end_date,
+          economy_price: Number(flightGenerate.economy_price),
+          business_price: Number(flightGenerate.business_price),
+          first_price: Number(flightGenerate.first_price),
+          legs: connectingLegsPrepared.map((leg) => ({
+            schedule_id: Number(leg.schedule_id),
+            aircraft_id: Number(leg.aircraft_id)
+          }))
+        },
+        "POST",
+        { silentSuccess: true }
+      );
       if (!result.ok) return;
 
       const generatedFlights = Number(
         (result.data as { generated_flights?: number } | undefined)?.generated_flights ?? 0
       );
       if (generatedFlights <= 0) {
-        setMessage("No flights were created. Check operating days and whether flights already exist for those dates.");
+        showAlert("No flights were created. Check operating days and whether flights already exist for those dates.", {
+          title: "No flights created"
+        });
         return;
       }
 
-      setMessage("");
       setSuccessDetail({
         kind: "generated",
+        route_type: "connecting",
         itinerary_id: itineraryId,
         route_label: routeLabel,
-        start_date: connectingForm.start_date,
-        end_date: connectingForm.end_date,
+        start_date: flightGenerate.start_date,
+        end_date: flightGenerate.end_date,
         generated_flights: generatedFlights,
         legs: legDetails
       });
       await loadConnectingItineraries();
+    } catch {
+      showAlert("Flight generation timed out or failed. Please try again.", { title: "Generation failed" });
     } finally {
       setIsGenerating(false);
     }
   }
+
+  const directScheduleSaved = useMemo(
+    () => schedules.some((row) => row.schedule_id === Number(directForm.schedule_id)),
+    [schedules, directForm.schedule_id]
+  );
+
+  const browseFilterKey = `${browseFilters.query}|${browseFilters.depAirport}|${browseFilters.arrAirport}|${browseFilters.airlineId}`;
+
+  const filteredConnectingItineraries = useMemo(
+    () =>
+      connectingItineraries.filter((row) =>
+        filterConnectingItineraryRow(row, browseFilters, parseOperatingDays(row.operating_days).join(", "))
+      ),
+    [connectingItineraries, browseFilters]
+  );
+
+  const filteredSchedules = useMemo(
+    () =>
+      schedules.filter((row) =>
+        filterScheduleLegRow(row, browseFilters, parseOperatingDays(row.operating_days).join(", "))
+      ),
+    [schedules, browseFilters]
+  );
 
   const autoRouteLabel = useMemo(() => buildConnectingRouteLabel(connectingLegsPrepared), [connectingLegsPrepared]);
 
@@ -592,24 +892,24 @@ export default function SchedulesMasterPage() {
   return (
     <div className="space-y-6">
       <RegistrationSuccessModal detail={successDetail} onClose={() => setSuccessDetail(null)} />
+      <StaffAlertModal alert={alert} onClose={clearAlert} />
 
       <PageTitle
         icon={CalendarClock}
         title="Flight Schedules"
-        description="Register direct legs or multi-stop connecting routes using itineraries + schedule legs (no extra tables)."
+        description="Step 1 — save a direct schedule or connecting itinerary. Step 2 — generate dated flights with seats and prices."
         accent="violet"
       />
 
       {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
-      <StaffMessage message={message} />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,480px)_1fr]">
         <div className="space-y-4">
           <div className="flex flex-wrap gap-2">
             {(
               [
-                ["direct", "Direct leg"],
-                ["connecting", "Connecting route"]
+                ["direct", "Direct flight"],
+                ["connecting", "Connecting itinerary"]
               ] as const
             ).map(([key, label]) => (
               <button
@@ -695,23 +995,58 @@ export default function SchedulesMasterPage() {
                 <MasterFormField label="Valid to" required>
                   <input type="date" lang="en-US" value={directForm.valid_to} onChange={(e) => setDirectForm((p) => ({ ...p, valid_to: e.target.value }))} className={masterInputClass} required />
                 </MasterFormField>
+                <div className="sm:col-span-2">
+                  <MasterFormField label="Operating days" hint="Flights are generated only on these weekdays">
+                    <div className="flex flex-wrap gap-2">
+                      {WEEKDAYS.map((day) => (
+                        <button
+                          key={day}
+                          type="button"
+                          onClick={() => toggleOperatingDay(day, "direct")}
+                          className={cn(
+                            "rounded-lg px-3 py-1.5 text-xs font-semibold transition",
+                            directForm.operating_days.includes(day) ? "bg-navy text-white" : "border border-zinc-200 bg-white text-zinc-600"
+                          )}
+                        >
+                          {day}
+                        </button>
+                      ))}
+                    </div>
+                  </MasterFormField>
+                </div>
               </div>
 
               <button type="submit" className="mt-5 w-full rounded-xl bg-navy px-4 py-2.5 text-sm font-semibold text-white hover:bg-navy/90">
                 {selectedDirectKey ? "Update direct schedule" : "Save direct schedule"}
               </button>
+
+              <GenerateDatedFlightsPanel
+                pricing={flightGenerate}
+                onChange={patchFlightGenerate}
+                onGenerate={() => void generateDirectFlights()}
+                isGenerating={isGenerating}
+                disabled={!directScheduleSaved}
+                buttonLabel="Generate direct flights"
+                hint={
+                  directScheduleSaved
+                    ? "Creates one bookable flight per operating day in the range, using the aircraft above."
+                    : "Save the schedule first — then you can generate dated flights here."
+                }
+              />
             </form>
           ) : (
             <form onSubmit={handleConnectingSubmit} className={formCardClass}>
               <div className="mb-4 flex items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold text-zinc-900">Add connecting route</h2>
+                <h2 className="text-lg font-semibold text-zinc-900">
+                  {selectedItineraryKey ? "Edit connecting itinerary" : "Add connecting itinerary"}
+                </h2>
                 <button type="button" onClick={startNewConnecting} className="text-xs font-medium text-brand hover:underline">
                   Reset
                 </button>
               </div>
 
               <p className="mb-4 text-sm text-zinc-500">
-                Saves each leg into <code className="text-xs">flight_schedules</code> and links them with a <code className="text-xs">Connecting</code> itinerary. Add as many legs as you need.
+                Link two or more legs into one bookable route. Each leg is saved as its own schedule row.
               </p>
 
               <div className="grid gap-4 sm:grid-cols-2">
@@ -833,13 +1168,22 @@ export default function SchedulesMasterPage() {
               </button>
 
               <div className="mt-4">
-                <MasterFormField label="Operating days">
-                  <div className="mt-2 flex flex-wrap gap-2">
+                <MasterFormField
+                  label="Operating days"
+                  hint={
+                    isLoadingItinerary
+                      ? "Loading saved days from database…"
+                      : selectedItineraryKey
+                        ? "Loaded from schedule_days for this itinerary."
+                        : "Select a saved itinerary to load days from the database."
+                  }
+                >
+                  <div className={cn("mt-2 flex flex-wrap gap-2", isLoadingItinerary && "pointer-events-none opacity-60")}>
                     {WEEKDAYS.map((day) => (
                       <button
                         key={day}
                         type="button"
-                        onClick={() => toggleOperatingDay(day)}
+                        onClick={() => toggleOperatingDay(day, "connecting")}
                         className={cn(
                           "rounded-full px-3 py-1.5 text-xs font-semibold transition",
                           connectingForm.operating_days.includes(day) ? "bg-navy text-white" : "border border-zinc-200 bg-white text-zinc-600"
@@ -853,39 +1197,35 @@ export default function SchedulesMasterPage() {
               </div>
 
               <button type="submit" className="mt-5 w-full rounded-xl bg-navy px-4 py-2.5 text-sm font-semibold text-white hover:bg-navy/90">
-                Save {autoRouteLabel || "connecting route"} ({connectingForm.legs.length} legs)
+                Save {autoRouteLabel || "connecting itinerary"} ({connectingForm.legs.length} legs)
               </button>
 
-              <div className="mt-5 rounded-xl border border-cerulean-100 bg-cerulean-50/40 p-4">
-                <p className="text-sm font-semibold text-cerulean-900">Generate dated flights</p>
-                <p className="mt-1 text-xs text-cerulean-800">
-                  Save the route first. Creates all legs on matching operating days (default MON/WED/FRI) within the date range.
-                </p>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <MasterFormField label="Start date">
-                    <input type="date" lang="en-US" value={connectingForm.start_date} onChange={(e) => setConnectingForm((p) => ({ ...p, start_date: e.target.value }))} className={masterInputClass} />
-                  </MasterFormField>
-                  <MasterFormField label="End date">
-                    <input type="date" lang="en-US" value={connectingForm.end_date} onChange={(e) => setConnectingForm((p) => ({ ...p, end_date: e.target.value }))} className={masterInputClass} />
-                  </MasterFormField>
-                </div>
-                <button
-                  type="button"
-                  disabled={isGenerating}
-                  onClick={() => void generateConnectingFlights()}
-                  className={cn(
-                    "mt-3 rounded-xl border border-cerulean-200 bg-white px-4 py-2 text-sm font-semibold text-cerulean-900 hover:bg-cerulean-50",
-                    isGenerating && "cursor-wait opacity-70"
-                  )}
-                >
-                  {isGenerating ? "Generating…" : "Generate connecting flights"}
-                </button>
-              </div>
+              <GenerateDatedFlightsPanel
+                pricing={flightGenerate}
+                onChange={patchFlightGenerate}
+                onGenerate={() => void generateConnectingFlights()}
+                isGenerating={isGenerating}
+                disabled={isLoadingItinerary}
+                buttonLabel="Generate connecting flights"
+                hint="Save the itinerary first. Creates all legs on matching operating days within the date range."
+              />
             </form>
           )}
         </div>
 
         <div className="space-y-6">
+          <ScheduleBrowseFiltersBar
+            airports={airports}
+            airlines={airlines}
+            filters={browseFilters}
+            onChange={(patch) => setBrowseFilters((prev) => ({ ...prev, ...patch }))}
+            onClear={() => setBrowseFilters({ ...EMPTY_SCHEDULE_BROWSE_FILTERS })}
+            itineraryCount={filteredConnectingItineraries.length}
+            itineraryTotal={connectingItineraries.length}
+            legCount={filteredSchedules.length}
+            legTotal={schedules.length}
+          />
+
           <section className={formCardClass}>
             <h2 className="mb-1 text-lg font-semibold text-zinc-900">Connecting itineraries</h2>
             <p className="mb-4 text-sm text-zinc-500">
@@ -894,19 +1234,12 @@ export default function SchedulesMasterPage() {
               <span className="font-medium text-zinc-700">Generated</span> counts dated flights after you run Generate.
             </p>
             <MasterRecordTable
-              rows={connectingItineraries}
+              key={`connecting-${browseFilterKey}`}
+              rows={filteredConnectingItineraries}
+              pageSize={SCHEDULES_TABLE_PAGE_SIZE}
               rowKey={(row) => String(row.itinerary_id)}
               selectedKey={selectedItineraryKey}
-              onSelect={(row) => {
-                setSelectedItineraryKey(String(row.itinerary_id));
-                setConnectingForm((prev) => ({
-                  ...prev,
-                  itinerary_id: String(row.itinerary_id),
-                  departure_airport_code: row.departure_airport_code,
-                  arrival_airport_code: row.arrival_airport_code
-                }));
-                setMode("connecting");
-              }}
+              onSelect={loadItineraryIntoForm}
               onDelete={handleDeleteItinerary}
               columns={[
                 { key: "itinerary_id", label: "ID" },
@@ -927,18 +1260,24 @@ export default function SchedulesMasterPage() {
                   render: (r) => String(r.generated_leg_count ?? 0)
                 }
               ]}
-              emptyMessage="No connecting itineraries yet."
+              emptyMessage={
+                connectingItineraries.length
+                  ? "No connecting itineraries match your filters."
+                  : "No connecting itineraries yet."
+              }
             />
           </section>
 
           <section className={formCardClass}>
             <h2 className="mb-1 text-lg font-semibold text-zinc-900">Schedule legs</h2>
-            <p className="mb-4 text-sm text-zinc-500">All registered recurring legs (direct or part of a connecting route).</p>
+            <p className="mb-4 text-sm text-zinc-500">All registered recurring legs (direct or part of a connecting itinerary).</p>
             {loading ? (
               <div className="h-48 animate-pulse rounded-xl bg-zinc-100" />
             ) : (
               <MasterRecordTable
-                rows={schedules}
+                key={`legs-${browseFilterKey}`}
+                rows={filteredSchedules}
+                pageSize={SCHEDULES_TABLE_PAGE_SIZE}
                 rowKey={(row) => String(row.schedule_id)}
                 selectedKey={selectedDirectKey}
                 onSelect={editDirectRow}
@@ -946,9 +1285,22 @@ export default function SchedulesMasterPage() {
                   { key: "schedule_id", label: "ID" },
                   { key: "flight_number", label: "Flight" },
                   { key: "route", label: "Route", render: (r) => `${r.dep_airport} → ${r.arr_airport}` },
+                  {
+                    key: "operating_days",
+                    label: "Days",
+                    render: (r) => parseOperatingDays(r.operating_days).join(", ")
+                  },
                   { key: "dep_time", label: "Times", render: (r) => `${formatTimeValue(r.dep_time)} – ${formatTimeValue(r.arr_time)}` },
-                  { key: "valid_from", label: "Valid", render: (r) => `${String(r.valid_from).slice(0, 10)} → ${String(r.valid_to).slice(0, 10)}` }
+                  { key: "valid_from", label: "Valid", render: (r) => `${String(r.valid_from).slice(0, 10)} → ${String(r.valid_to).slice(0, 10)}` },
+                  {
+                    key: "generated_flight_count",
+                    label: "Generated",
+                    render: (r) => String(r.generated_flight_count ?? 0)
+                  }
                 ]}
+                emptyMessage={
+                  schedules.length ? "No schedule legs match your filters." : "No schedule legs yet."
+                }
               />
             )}
           </section>

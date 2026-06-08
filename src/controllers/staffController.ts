@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
 import { isStaffRole } from "@/lib/roles";
@@ -25,9 +25,25 @@ type KpiRow = RowDataPacket & {
 const WEEKDAY_NAMES = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] as const;
 
 function addDaysIso(date: string, days: number) {
-  const next = new Date(`${date}T00:00:00`);
-  next.setDate(next.getDate() + days);
+  const next = new Date(`${date}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + days);
   return next.toISOString().slice(0, 10);
+}
+
+function dayNameFromIso(date: string) {
+  return WEEKDAY_NAMES[new Date(`${date}T12:00:00Z`).getUTCDay()];
+}
+
+async function legsOperateOnDay(connection: PoolConnection, scheduleIds: number[], dayName: string) {
+  if (scheduleIds.length === 0) return false;
+  const placeholders = scheduleIds.map(() => "?").join(", ");
+  const [rows] = await connection.query<RowDataPacket[]>(
+    `SELECT COUNT(DISTINCT schedule_id) AS cnt
+     FROM schedule_days
+     WHERE day_of_week = ? AND schedule_id IN (${placeholders})`,
+    [dayName, ...scheduleIds]
+  );
+  return Number(rows[0]?.cnt ?? 0) === scheduleIds.length;
 }
 
 function parseScheduleIds(value: unknown): number[] {
@@ -38,6 +54,31 @@ function parseScheduleIds(value: unknown): number[] {
     return raw.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
   } catch {
     return [];
+  }
+}
+
+function parseSeatPrices(body: Record<string, unknown>) {
+  const economy = Number(body.economy_price ?? 780);
+  const business = Number(body.business_price ?? 2400);
+  const first = Number(body.first_price ?? 5200);
+  if (![economy, business, first].every((price) => Number.isFinite(price) && price >= 0)) {
+    return { error: badRequest("Seat prices must be non-negative numbers.") as ReturnType<typeof badRequest>, prices: null };
+  }
+  return { error: null, prices: { economy, business, first } };
+}
+
+async function generateSeatsForFlights(
+  connection: PoolConnection,
+  flightIds: number[],
+  prices: { economy: number; business: number; first: number }
+) {
+  for (const flightId of flightIds) {
+    await connection.query("CALL generate_flight_seats(?, ?, ?, ?)", [
+      flightId,
+      prices.economy,
+      prices.business,
+      prices.first
+    ]);
   }
 }
 
@@ -114,31 +155,23 @@ export async function generateConnectingFlights(request: NextRequest) {
     let nextFlightId = Number(maxFlightRows[0]?.max_id ?? 0) + 1;
     let generated = 0;
     let candidateDays = 0;
+    const newFlightIds: number[] = [];
 
     for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
-      const dayName = WEEKDAY_NAMES[new Date(`${currentDate}T00:00:00`).getDay()];
-
-      const operatingChecks = await Promise.all(
-        legs.map(async (leg) => {
-          const [rows] = await connection.query<RowDataPacket[]>(
-            "SELECT 1 FROM schedule_days WHERE schedule_id = ? AND day_of_week = ? LIMIT 1",
-            [leg.schedule_id, dayName]
-          );
-          return rows.length > 0;
-        })
-      );
-
-      if (!operatingChecks.every(Boolean)) continue;
+      const dayName = dayNameFromIso(currentDate);
+      const operates = await legsOperateOnDay(connection, scheduleIds, dayName);
+      if (!operates) continue;
       candidateDays += 1;
 
       for (let segmentOrder = 0; segmentOrder < legs.length; segmentOrder += 1) {
         const leg = legs[segmentOrder];
+        const flightId = nextFlightId;
         const [insertResult] = await connection.query<ResultSetHeader>(
           `INSERT IGNORE INTO flights (
              flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status
            ) VALUES (?, ?, ?, ?, ?, ?, 'Outbound', 'Scheduled')`,
           [
-            nextFlightId,
+            flightId,
             itineraryId,
             leg.schedule_id,
             currentDate,
@@ -149,6 +182,7 @@ export async function generateConnectingFlights(request: NextRequest) {
 
         if (insertResult.affectedRows > 0) {
           generated += 1;
+          newFlightIds.push(flightId);
         }
         nextFlightId += 1;
       }
@@ -166,8 +200,146 @@ export async function generateConnectingFlights(request: NextRequest) {
       );
     }
 
+    const priceResult = parseSeatPrices(body as Record<string, unknown>);
+    if (priceResult.error) {
+      await connection.rollback();
+      return priceResult.error;
+    }
+
+    await generateSeatsForFlights(connection, newFlightIds, priceResult.prices!);
+
     await connection.commit();
-    return created({ itinerary_id: itineraryId, generated_flights: generated });
+    return created({
+      itinerary_id: itineraryId,
+      generated_flights: generated,
+      seats_generated: newFlightIds.length
+    });
+  } catch (error) {
+    await connection.rollback();
+    return serverError(error);
+  } finally {
+    connection.release();
+  }
+}
+
+export async function generateDirectFlights(request: NextRequest) {
+  const session = await requireStaffSession();
+  if (session.error) return session.error;
+
+  const body = await readJson(request);
+  const required = ["schedule_id", "aircraft_id", "start_date", "end_date"];
+  const missing = required.filter((key) => body[key] === undefined || body[key] === "");
+  if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
+
+  const scheduleId = Number(body.schedule_id);
+  const aircraftId = Number(body.aircraft_id);
+  const startDate = String(body.start_date);
+  const endDate = String(body.end_date);
+  if (startDate > endDate) return badRequest("Start date must be on or before end date.");
+
+  const priceResult = parseSeatPrices(body as Record<string, unknown>);
+  if (priceResult.error) return priceResult.error;
+
+  const connection = await getPool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [scheduleRows] = await connection.query<
+      Array<RowDataPacket & { valid_from: string; valid_to: string; dep_airport: string; arr_airport: string }>
+    >("SELECT valid_from, valid_to, dep_airport, arr_airport FROM flight_schedules WHERE schedule_id = ?", [
+      scheduleId
+    ]);
+
+    const schedule = scheduleRows[0];
+    if (!schedule) {
+      await connection.rollback();
+      return badRequest("Save the direct schedule first, then generate dated flights.");
+    }
+
+    const validFrom = String(schedule.valid_from).slice(0, 10);
+    const validTo = String(schedule.valid_to).slice(0, 10);
+    if (startDate < validFrom || endDate > validTo) {
+      await connection.rollback();
+      return badRequest(`Date range must fall within the schedule validity period (${validFrom} → ${validTo}).`);
+    }
+
+    const [aircraftRows] = await connection.query<RowDataPacket[]>(
+      "SELECT aircraft_id FROM aircraft WHERE aircraft_id = ?",
+      [aircraftId]
+    );
+    if (!aircraftRows[0]) {
+      await connection.rollback();
+      return badRequest("Selected aircraft does not exist.");
+    }
+
+    const [maxFlightRows] = await connection.query<RowDataPacket[]>(
+      "SELECT COALESCE(MAX(flight_id), 0) AS max_id FROM flights FOR UPDATE"
+    );
+    let nextFlightId = Number(maxFlightRows[0]?.max_id ?? 0) + 1;
+
+    const [maxItineraryRows] = await connection.query<RowDataPacket[]>(
+      "SELECT COALESCE(MAX(itinerary_id), 0) AS max_id FROM itineraries FOR UPDATE"
+    );
+    let nextItineraryId = Number(maxItineraryRows[0]?.max_id ?? 0) + 1;
+
+    let generated = 0;
+    let candidateDays = 0;
+    const newFlightIds: number[] = [];
+
+    for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
+      const dayName = dayNameFromIso(currentDate);
+      const operates = await legsOperateOnDay(connection, [scheduleId], dayName);
+      if (!operates) continue;
+      candidateDays += 1;
+
+      const flightId = nextFlightId;
+      const itineraryId = nextItineraryId;
+      nextFlightId += 1;
+      nextItineraryId += 1;
+
+      await connection.query(
+        `INSERT INTO itineraries (
+           itinerary_id, trip_type, departure_airport_code, arrival_airport_code
+         ) VALUES (?, 'OneWay', ?, ?)`,
+        [itineraryId, schedule.dep_airport, schedule.arr_airport]
+      );
+
+      const [insertResult] = await connection.query<ResultSetHeader>(
+        `INSERT IGNORE INTO flights (
+           flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status
+         ) VALUES (?, ?, ?, ?, ?, 1, 'Outbound', 'Scheduled')`,
+        [flightId, itineraryId, scheduleId, currentDate, aircraftId]
+      );
+
+      if (insertResult.affectedRows > 0) {
+        generated += 1;
+        newFlightIds.push(flightId);
+      } else {
+        await connection.query("DELETE FROM itineraries WHERE itinerary_id = ?", [itineraryId]);
+      }
+    }
+
+    if (generated === 0) {
+      await connection.rollback();
+      if (candidateDays === 0) {
+        return badRequest(
+          "No flights were created. The selected date range has no days matching this schedule's operating days."
+        );
+      }
+      return badRequest(
+        "No new flights were created. Flights may already exist for those dates on this schedule."
+      );
+    }
+
+    await generateSeatsForFlights(connection, newFlightIds, priceResult.prices!);
+
+    await connection.commit();
+    return created({
+      schedule_id: scheduleId,
+      generated_flights: generated,
+      seats_generated: newFlightIds.length
+    });
   } catch (error) {
     await connection.rollback();
     return serverError(error);

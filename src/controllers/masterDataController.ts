@@ -93,30 +93,108 @@ export async function listAircraft() {
   const session = await requireStaffSession();
   if (session.error) return session.error;
   const [rows] = await getPool().query(
-    `SELECT a.*, al.airline_name
+    `SELECT
+       a.*,
+       al.airline_name,
+       COALESCE(seat_stats.configured_seats, 0) AS configured_seats,
+       COALESCE(seat_stats.first_seats, 0) AS first_seats,
+       COALESCE(seat_stats.business_seats, 0) AS business_seats,
+       COALESCE(seat_stats.economy_seats, 0) AS economy_seats
      FROM aircraft a
      JOIN airlines al ON a.airline_id = al.airline_id
+     LEFT JOIN (
+       SELECT
+         aircraft_id,
+         COUNT(*) AS configured_seats,
+         SUM(CASE WHEN class_id = 3 THEN 1 ELSE 0 END) AS first_seats,
+         SUM(CASE WHEN class_id = 2 THEN 1 ELSE 0 END) AS business_seats,
+         SUM(CASE WHEN class_id = 1 THEN 1 ELSE 0 END) AS economy_seats
+       FROM aircraft_seats
+       GROUP BY aircraft_id
+     ) seat_stats ON seat_stats.aircraft_id = a.aircraft_id
      ORDER BY a.aircraft_id`
   );
   return ok({ rows });
+}
+
+export async function getAircraftDetail(aircraftId: number) {
+  const session = await requireStaffSession();
+  if (session.error) return session.error;
+
+  if (!Number.isFinite(aircraftId) || aircraftId <= 0) {
+    return badRequest("Invalid aircraft ID.");
+  }
+
+  const [aircraftRows] = await getPool().query<RowDataPacket[]>(
+    `SELECT a.*, al.airline_name
+     FROM aircraft a
+     JOIN airlines al ON a.airline_id = al.airline_id
+     WHERE a.aircraft_id = ?`,
+    [aircraftId]
+  );
+
+  if (!aircraftRows[0]) {
+    return badRequest("Aircraft not found.");
+  }
+
+  const [seatRows] = await getPool().query<RowDataPacket[]>(
+    `SELECT seat_number, class_id
+     FROM aircraft_seats
+     WHERE aircraft_id = ?
+     ORDER BY seat_number`,
+    [aircraftId]
+  );
+
+  return ok({
+    aircraft: aircraftRows[0],
+    seats: seatRows
+  });
 }
 
 export async function upsertAircraft(request: NextRequest) {
   const session = await requireStaffSession();
   if (session.error) return session.error;
   const body = await readJson(request);
-  const missing = ["aircraft_id", "airline_id", "model", "capacity"].filter((k) => body[k] === undefined || body[k] === "");
+  const missing = ["aircraft_id", "airline_id", "model"].filter((k) => body[k] === undefined || body[k] === "");
   if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
+
+  const aircraftId = Number(body.aircraft_id);
+  const seats = Array.isArray(body.seats) ? body.seats : [];
+  if (seats.length === 0) {
+    return badRequest("Configure at least one seat in the layout before saving.");
+  }
+
+  const connection = await getPool().getConnection();
+
   try {
-    await callProcedure("CALL upsert_aircraft(?, ?, ?, ?)", [
-      Number(body.aircraft_id),
+    await connection.beginTransaction();
+
+    await connection.query("CALL upsert_aircraft(?, ?, ?, ?)", [
+      aircraftId,
       String(body.airline_id),
       String(body.model),
-      Number(body.capacity)
+      Number(body.capacity ?? seats.length)
     ]);
-    return created({ aircraft_id: body.aircraft_id });
+
+    await connection.query("CALL replace_aircraft_seats(?, ?)", [aircraftId, JSON.stringify(seats)]);
+
+    await connection.commit();
+    return created({
+      aircraft_id: aircraftId,
+      seat_count: seats.length
+    });
   } catch (error) {
+    await connection.rollback();
+    const message = error instanceof Error ? error.message : "Failed to save aircraft.";
+    if (/foreign key constraint|Cannot delete or update a parent row/i.test(message)) {
+      return conflict(
+        "Seat layout could not be replaced because this aircraft is already used on generated flights. Keep existing seat numbers or remove those flights first.",
+        "AIRCRAFT_SEATS_IN_USE"
+      );
+    }
     return serverError(error);
+  } finally {
+    connection.release();
   }
 }
 
@@ -124,9 +202,29 @@ export async function listSchedules() {
   const session = await requireStaffSession();
   if (session.error) return session.error;
   const [rows] = await getPool().query(
-    `SELECT fs.*, al.airline_name
+    `SELECT
+       fs.*,
+       al.airline_name,
+       COALESCE(gen.generated_flight_count, 0) AS generated_flight_count,
+       COALESCE(
+         (
+           SELECT JSON_ARRAYAGG(ordered.day_of_week)
+           FROM (
+             SELECT sd.day_of_week
+             FROM schedule_days sd
+             WHERE sd.schedule_id = fs.schedule_id
+             ORDER BY FIELD(sd.day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
+           ) ordered
+         ),
+         JSON_ARRAY('MON', 'WED', 'FRI')
+       ) AS operating_days
      FROM flight_schedules fs
      JOIN airlines al ON fs.airline_id = al.airline_id
+     LEFT JOIN (
+       SELECT schedule_id, COUNT(*) AS generated_flight_count
+       FROM flights
+       GROUP BY schedule_id
+     ) gen ON gen.schedule_id = fs.schedule_id
      ORDER BY fs.schedule_id`
   );
   return ok({ rows });
@@ -167,7 +265,23 @@ export async function listConnectingItineraries() {
          sl.route_label,
          CONCAT(i.departure_airport_code, ' → ', i.arrival_airport_code)
        ) AS route_label,
-       sl.leg_summary
+       sl.leg_summary,
+       i.leg_schedule_ids,
+       COALESCE(
+         (
+           SELECT JSON_ARRAYAGG(ordered.day_of_week)
+           FROM (
+             SELECT sd.day_of_week
+             FROM schedule_days sd
+             WHERE sd.schedule_id = CAST(
+               JSON_UNQUOTE(JSON_EXTRACT(i.leg_schedule_ids, '$[0]'))
+               AS UNSIGNED
+             )
+             ORDER BY FIELD(sd.day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
+           ) ordered
+         ),
+         JSON_ARRAY('MON', 'WED', 'FRI')
+       ) AS operating_days
      FROM itineraries i
      LEFT JOIN (
        SELECT
@@ -203,6 +317,77 @@ export async function listConnectingItineraries() {
      ORDER BY i.itinerary_id`
   );
   return ok({ rows });
+}
+
+export async function getConnectingItineraryDetail(itineraryId: number) {
+  const session = await requireStaffSession();
+  if (session.error) return session.error;
+
+  if (!Number.isFinite(itineraryId) || itineraryId <= 0) {
+    return badRequest("Invalid itinerary ID.");
+  }
+
+  const [itineraryRows] = await getPool().query<RowDataPacket[]>(
+    `SELECT
+       itinerary_id,
+       trip_type,
+       departure_airport_code,
+       arrival_airport_code,
+       leg_schedule_ids
+     FROM itineraries
+     WHERE itinerary_id = ?`,
+    [itineraryId]
+  );
+
+  const itinerary = itineraryRows[0];
+  if (!itinerary || itinerary.trip_type !== "Connecting") {
+    return badRequest("Connecting itinerary not found.");
+  }
+
+  const [legRows] = await getPool().query<RowDataPacket[]>(
+    `SELECT
+       fs.schedule_id,
+       fs.airline_id,
+       fs.flight_number,
+       fs.dep_airport,
+       fs.arr_airport,
+       fs.dep_time,
+       fs.arr_time,
+       fs.valid_from,
+       fs.valid_to,
+       jt.ord AS leg_index
+     FROM itineraries i
+     INNER JOIN JSON_TABLE(
+       i.leg_schedule_ids,
+       '$[*]' COLUMNS (
+         ord FOR ORDINALITY,
+         schedule_id INT PATH '$'
+       )
+     ) jt
+     INNER JOIN flight_schedules fs ON fs.schedule_id = jt.schedule_id
+     WHERE i.itinerary_id = ?
+     ORDER BY jt.ord`,
+    [itineraryId]
+  );
+
+  const [dayRows] = await getPool().query<RowDataPacket[]>(
+    `SELECT sd.day_of_week
+     FROM schedule_days sd
+     WHERE sd.schedule_id = CAST(
+       JSON_UNQUOTE(JSON_EXTRACT(
+         (SELECT leg_schedule_ids FROM itineraries WHERE itinerary_id = ?),
+         '$[0]'
+       )) AS UNSIGNED
+     )
+     ORDER BY FIELD(sd.day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')`,
+    [itineraryId]
+  );
+
+  return ok({
+    itinerary,
+    legs: legRows,
+    operating_days: dayRows.map((row) => String(row.day_of_week))
+  });
 }
 
 export async function deleteConnectingItinerary(request: NextRequest) {
@@ -385,9 +570,15 @@ export async function upsertSchedule(request: NextRequest) {
   ];
   const missing = required.filter((k) => body[k] === undefined || body[k] === "");
   if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
+
+  const scheduleId = Number(body.schedule_id);
+  const operatingDays = normalizeOperatingDays(body.operating_days);
+  const connection = await getPool().getConnection();
+
   try {
-    await callProcedure("CALL upsert_flight_schedule(?, ?, ?, ?, ?, ?, ?, ?, ?)", [
-      Number(body.schedule_id),
+    await connection.beginTransaction();
+    await connection.query("CALL upsert_flight_schedule(?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+      scheduleId,
       String(body.airline_id),
       String(body.flight_number),
       String(body.dep_airport),
@@ -397,9 +588,20 @@ export async function upsertSchedule(request: NextRequest) {
       String(body.valid_from),
       String(body.valid_to)
     ]);
-    return created({ schedule_id: body.schedule_id });
+    await connection.query("DELETE FROM schedule_days WHERE schedule_id = ?", [scheduleId]);
+    for (const day of operatingDays) {
+      await connection.query("INSERT INTO schedule_days (schedule_id, day_of_week) VALUES (?, ?)", [
+        scheduleId,
+        day
+      ]);
+    }
+    await connection.commit();
+    return created({ schedule_id: scheduleId, operating_days: operatingDays });
   } catch (error) {
+    await connection.rollback();
     return serverError(error);
+  } finally {
+    connection.release();
   }
 }
 

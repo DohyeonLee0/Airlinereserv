@@ -59,7 +59,7 @@ function revenueTrend(monthly: OverviewData["monthlyRevenue"]) {
 const quickLinks = [
   { href: "/dashboard/reports", label: "Analytics & Reports", description: "Revenue, load factor, route breakdowns", icon: BarChart3 },
   { href: "/dashboard/bookings", label: "All Bookings", description: "Customer reservations and activity logs", icon: ClipboardList },
-  { href: "/dashboard/generate", label: "Flight Generation", description: "Create flights and seat inventory", icon: Plane }
+  { href: "/dashboard/master/schedules", label: "Flight Schedules", description: "Create routes and generate bookable flights", icon: Plane }
 ] as const;
 
 export default function DashboardOverviewPage() {

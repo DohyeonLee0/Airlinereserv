@@ -3,7 +3,9 @@ import {
   BarChart3,
   Building2,
   CalendarClock,
+  CalendarRange,
   ClipboardList,
+  Layers3,
   LayoutDashboard,
   Plane,
   ShieldCheck,
@@ -29,10 +31,11 @@ export const dashboardNav: DashboardNavItem[] = [
       { href: "/dashboard/master/airlines", label: "Airlines", icon: Building2 },
       { href: "/dashboard/master/airports", label: "Airports", icon: TowerControl },
       { href: "/dashboard/master/aircraft", label: "Aircraft", icon: Plane },
+      { href: "/dashboard/master/seat-templates", label: "Seat Templates", icon: Layers3 },
       { href: "/dashboard/master/schedules", label: "Flight Schedules", icon: CalendarClock }
     ]
   },
-  { href: "/dashboard/generate", label: "Flight Generation", icon: Plane },
+  { href: "/dashboard/schedules", label: "Schedule Tracker", icon: CalendarRange },
   { href: "/dashboard/promotions", label: "Promotions", icon: Tag },
   { href: "/dashboard/bookings", label: "All Bookings", icon: ClipboardList },
   { href: "/dashboard/reports", label: "Reports", icon: BarChart3 },
