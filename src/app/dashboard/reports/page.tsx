@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import ReportDataTable from "@/app/components/dashboard/ReportDataTable";
+import { ReportCharts } from "@/app/components/dashboard/ReportCharts";
 import ReportRowDetail, { reportRowKey } from "@/app/components/dashboard/ReportRowDetail";
 import { PageTitle } from "@/app/components/dashboard/PageTitle";
 
@@ -87,14 +88,17 @@ export default function ReportsPage() {
             <div className="h-64 rounded-xl bg-zinc-100" />
           </div>
         ) : (
-          <ReportDataTable
-            key={reportKey}
-            rows={rows}
-            onRowClick={handleRowClick}
-            selectedRowKey={selectedRowKey}
-            getRowKey={(row) => reportRowKey(reportKey, row)}
-            emptyMessage="No report data available."
-          />
+          <>
+            <ReportDataTable
+              key={reportKey}
+              rows={rows}
+              onRowClick={handleRowClick}
+              selectedRowKey={selectedRowKey}
+              getRowKey={(row) => reportRowKey(reportKey, row)}
+              emptyMessage="No report data available."
+            />
+            <ReportCharts reportKey={reportKey} rows={rows} />
+          </>
         )}
       </section>
 
