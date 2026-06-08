@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { FormEvent, Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { notifyAuthChanged } from "@/lib/authEvents";
 
 function LoginForm() {
   const router = useRouter();
@@ -27,6 +28,7 @@ function LoginForm() {
       setError(json.message ?? "Login failed");
       return;
     }
+    notifyAuthChanged();
     const role = json.data?.user?.role;
     if (role === "Customer") router.push(next === "/" ? "/bookings" : next);
     else router.push("/dashboard");

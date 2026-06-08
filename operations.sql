@@ -487,13 +487,17 @@ DELIMITER //
 CREATE PROCEDURE search_flights (
     IN p_dep_airport CHAR(3),
     IN p_arr_airport CHAR(3),
-    IN p_flight_date DATE
+    IN p_flight_date DATE,
+    IN p_class_id    INT,
+    IN p_max_price   DECIMAL(10,2)
 )
 BEGIN
     SELECT
+        'DIRECT'               AS route_type,
         f.flight_id,
         f.itinerary_id,
         fs.airline_id,
+        al.airline_name,
         fs.flight_number,
         fs.dep_airport,
         fs.arr_airport,
@@ -501,36 +505,39 @@ BEGIN
         fs.dep_time,
         fs.arr_time,
         f.status,
-        f.segment_order,
-        f.leg_type,
-        COUNT(CASE WHEN fls.is_available = 1 THEN 1 END)     AS available_seats,
-        MIN(CASE WHEN fls.is_available = 1 THEN fls.price END) AS lowest_available_price
+        sc.class_id,
+        sc.class_name,
+        COUNT(fls.seat_number) AS available_seats,
+        MIN(fls.price)         AS lowest_price
     FROM   flights f
     JOIN   flight_schedules fs ON f.schedule_id = fs.schedule_id
-    LEFT JOIN flight_seats fls ON f.flight_id   = fls.flight_id
-    WHERE  fs.dep_airport = p_dep_airport
-      AND  fs.arr_airport = p_arr_airport
-      AND  f.flight_date  = p_flight_date
-      AND  f.status       = 'Scheduled'
+    JOIN   airlines al           ON fs.airline_id = al.airline_id
+    JOIN   flight_seats fls      ON f.flight_id   = fls.flight_id
+    JOIN   seat_classes sc       ON fls.class_id  = sc.class_id
+    WHERE  fs.dep_airport  = p_dep_airport
+      AND  fs.arr_airport  = p_arr_airport
+      AND  f.flight_date   = p_flight_date
+      AND  f.status        = 'Scheduled'
+      AND  fls.is_available = 1
+      AND  (p_class_id  IS NULL OR fls.class_id = p_class_id)
+      AND  (p_max_price IS NULL OR fls.price   <= p_max_price)
     GROUP BY
-        f.flight_id, f.itinerary_id, fs.airline_id, fs.flight_number,
-        fs.dep_airport, fs.arr_airport,
-        f.flight_date, fs.dep_time, fs.arr_time, f.status, f.segment_order, f.leg_type
-    ORDER BY fs.dep_time;
+        f.flight_id, f.itinerary_id, fs.airline_id, al.airline_name,
+        fs.flight_number, fs.dep_airport, fs.arr_airport,
+        f.flight_date, fs.dep_time, fs.arr_time, f.status,
+        sc.class_id, sc.class_name
+    ORDER BY fs.dep_time ASC, sc.class_id ASC, lowest_price ASC;
 END //
 
 DELIMITER ;
 
 -- Example:
--- CALL search_flights('ICN', 'JFK', '2026-06-01');
+-- CALL search_flights('ICN', 'JFK', '2026-06-01', NULL, NULL);
 
 
 -- ============================================================
 -- OPERATION 2-B
--- Customer: Advanced Flight Search
---
--- Adds seat class filter and maximum price filter
--- on top of basic search.
+-- Customer: Advanced Flight Search (alias of unified search_flights)
 -- ============================================================
 
 DELIMITER //
@@ -543,34 +550,13 @@ CREATE PROCEDURE advanced_search_flights (
     IN p_max_price   DECIMAL(10,2)
 )
 BEGIN
-    SELECT
-        f.flight_id,
-        fs.airline_id,
-        fs.flight_number,
-        fs.dep_airport,
-        fs.arr_airport,
-        f.flight_date,
-        fs.dep_time,
-        fs.arr_time,
-        sc.class_name,
-        COUNT(fls.seat_number) AS available_seats,
-        MIN(fls.price)         AS lowest_price
-    FROM   flights f
-    JOIN   flight_schedules fs ON f.schedule_id = fs.schedule_id
-    JOIN   flight_seats fls    ON f.flight_id   = fls.flight_id
-    JOIN   seat_classes sc     ON fls.class_id  = sc.class_id
-    WHERE  fs.dep_airport  = p_dep_airport
-      AND  fs.arr_airport  = p_arr_airport
-      AND  f.flight_date   = p_flight_date
-      AND  f.status        = 'Scheduled'
-      AND  fls.is_available = 1
-      AND  (p_class_id  IS NULL OR fls.class_id = p_class_id)
-      AND  (p_max_price IS NULL OR fls.price   <= p_max_price)
-    GROUP BY
-        f.flight_id, fs.airline_id, fs.flight_number,
-        fs.dep_airport, fs.arr_airport,
-        f.flight_date, fs.dep_time, fs.arr_time, sc.class_name
-    ORDER BY lowest_price ASC, fs.dep_time ASC;
+    CALL search_flights(
+        p_dep_airport,
+        p_arr_airport,
+        p_flight_date,
+        p_class_id,
+        p_max_price
+    );
 END //
 
 DELIMITER ;
@@ -2895,7 +2881,7 @@ DELIMITER ;
 -- SELECT * FROM flight_seats WHERE flight_id = 1001 ORDER BY seat_number;
 
 -- Demo 3. Flight search (all variants)
--- CALL search_flights('ICN', 'JFK', '2026-06-01');
+-- CALL search_flights('ICN', 'JFK', '2026-06-01', NULL, NULL);
 -- CALL advanced_search_flights('ICN', 'JFK', '2026-06-01', 1, 500.00);
 -- CALL search_flights_with_promotions('ICN', 'JFK', '2026-06-01', 1, 500.00);
 -- CALL search_direct_and_connecting_flights('ICN', 'JFK', '2026-06-01', 1);

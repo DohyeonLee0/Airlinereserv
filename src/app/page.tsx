@@ -17,17 +17,24 @@ import FlightSearchWidget from "@/app/components/home/FlightSearchWidget";
 import PopularRouteCard from "@/app/components/home/PopularRouteCard";
 import Button from "@/app/components/ui/Button";
 import { cn } from "@/lib/cn";
+import { routeKey, type JourneyType } from "@/lib/flightSearch";
 import {
   flightIdsOf,
   flightNumbersOf,
-  isConnectingRoute,
   stopLabel,
   type RouteRow
 } from "@/lib/routeSearch";
 
-type SearchTab = "basic" | "promotions" | "recommend";
-type ResultFilter = "direct" | "all" | "connections";
-type SeatClass = "Economy" | "Business" | "First";
+type SeatClass = "" | "Economy" | "Business" | "First";
+
+type SearchResults = {
+  outbound: RouteRow[];
+  return: RouteRow[];
+  bestOutboundKey: string | null;
+  bestReturnKey: string | null;
+  noPromotionalDeals: boolean;
+  journeyType: JourneyType;
+};
 
 type ExploreDeal = {
   arr: string;
@@ -45,8 +52,6 @@ const POPULAR_FROM_ICN = [
   { arr: "CDG", city: "Paris", country: "France" },
   { arr: "BKK", city: "Bangkok", country: "Thailand" }
 ] as const;
-
-const QUICK_PROMOS = ["SUMMER10", "BUSINESS15", "ICNUSA20", "ASIA12"];
 
 const HERO_STATS = [
   { label: "Global routes", value: "120+" },
@@ -93,30 +98,23 @@ const STEPS = [
   { step: "03", title: "Choose your seat", desc: "Select seats and complete your booking in a few clicks." }
 ] as const;
 
-function filterRoutes(routes: RouteRow[], filter: ResultFilter, isPromotionTab: boolean) {
-  if (isPromotionTab) return routes;
-  if (filter === "direct") return routes.filter((row) => !isConnectingRoute(row));
-  if (filter === "connections") return routes.filter((row) => isConnectingRoute(row));
-  return routes;
-}
-
 function flightIdOf(row: RouteRow) {
   return flightIdsOf(row)[0] ?? "";
 }
 
 export default function HomePage() {
   const resultsRef = useRef<HTMLElement>(null);
-  const [tab, setTab] = useState<SearchTab>("basic");
   const [form, setForm] = useState({
     dep_airport: "ICN",
     arr_airport: "JFK",
     flight_date: "2026-06-10",
-    class_name: "Economy" as SeatClass,
+    return_date: "2026-06-17",
+    journey_type: "one_way" as JourneyType,
+    class_name: "" as SeatClass,
     max_price: "",
-    promo_code: "SUMMER10"
+    apply_promotions: false
   });
-  const [routes, setRoutes] = useState<RouteRow[]>([]);
-  const [resultFilter, setResultFilter] = useState<ResultFilter>("all");
+  const [searchResults, setSearchResults] = useState<SearchResults | null>(null);
   const [recommended, setRecommended] = useState<RouteRow[]>([]);
   const [exploreDeals, setExploreDeals] = useState<ExploreDeal[]>(
     POPULAR_FROM_ICN.map((d) => ({ ...d, topRoute: null, loading: true }))
@@ -126,8 +124,6 @@ export default function HomePage() {
   const [hasSearched, setHasSearched] = useState(false);
   const [sessionUser, setSessionUser] = useState<{ role: string } | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const visibleRoutes = filterRoutes(routes, resultFilter, tab === "promotions");
-
   useEffect(() => {
     fetch("/api/auth/me")
       .then((res) => res.json())
@@ -146,9 +142,9 @@ export default function HomePage() {
     const params = new URLSearchParams({
       dep_airport: dep,
       arr_airport: arr,
-      flight_date: date,
-      class_name: className
+      flight_date: date
     });
+    if (className) params.set("class_name", className);
     const response = await fetch(`/api/flights/recommend?${params}`);
     const json = await response.json();
     return (json.data?.routes ?? []) as RouteRow[];
@@ -181,7 +177,7 @@ export default function HomePage() {
     };
   }, [form.flight_date, form.class_name, loadRecommended]);
 
-  async function runSearch(nextTab = tab, scrollToResults = true, overrides?: Partial<typeof form>) {
+  async function runSearch(scrollToResults = true, overrides?: Partial<typeof form>) {
     const activeForm = { ...form, ...overrides };
     setLoading(true);
     setError("");
@@ -191,34 +187,40 @@ export default function HomePage() {
       dep_airport: activeForm.dep_airport,
       arr_airport: activeForm.arr_airport,
       flight_date: activeForm.flight_date,
-      class_name: activeForm.class_name
+      journey_type: activeForm.journey_type,
+      apply_promotions: String(activeForm.apply_promotions)
     });
+    if (activeForm.class_name) params.set("class_name", activeForm.class_name);
     if (activeForm.max_price) params.set("max_price", activeForm.max_price);
-    if (nextTab === "promotions" && activeForm.promo_code) params.set("promo_code", activeForm.promo_code.trim().toUpperCase());
-
-    const endpoint =
-      nextTab === "basic"
-        ? "/api/flights/search/connecting"
-        : nextTab === "promotions"
-          ? "/api/flights/search/promotions"
-          : "/api/flights/recommend";
+    if (activeForm.journey_type === "round_trip") {
+      params.set("return_date", activeForm.return_date);
+    }
 
     try {
-      const response = await fetch(`${endpoint}?${params}`);
+      const response = await fetch(`/api/flights/search?${params}`);
       const json = await response.json();
       if (!response.ok || !json.success) {
         setError(json.message ?? "An error occurred while searching.");
-        setRoutes([]);
+        setSearchResults(null);
         return;
       }
-      setRoutes(json.data?.routes ?? []);
-      setResultFilter("all");
+
+      const data = json.data ?? {};
+      setSearchResults({
+        outbound: data.outbound ?? data.routes ?? [],
+        return: data.return ?? [],
+        bestOutboundKey: data.bestOutboundKey ?? data.bestRouteKey ?? null,
+        bestReturnKey: data.bestReturnKey ?? null,
+        noPromotionalDeals: Boolean(data.noPromotionalDeals),
+        journeyType: data.journeyType ?? activeForm.journey_type
+      });
+
       if (scrollToResults) {
         setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
       }
     } catch {
       setError("An error occurred while searching.");
-      setRoutes([]);
+      setSearchResults(null);
     } finally {
       setLoading(false);
     }
@@ -234,15 +236,22 @@ export default function HomePage() {
   }
 
   function pickDestination(arr: string) {
-    setForm((prev) => ({ ...prev, arr_airport: arr }));
-    setTab("basic");
-    void runSearch("basic", true, { arr_airport: arr });
+    setForm((prev) => ({ ...prev, arr_airport: arr, journey_type: "one_way" }));
+    void runSearch(true, { arr_airport: arr, journey_type: "one_way" });
   }
 
-  function applyPromo(code: string) {
-    setForm((prev) => ({ ...prev, promo_code: code }));
-    setTab("promotions");
-    void runSearch("promotions", true, { promo_code: code });
+  function renderResultCards(
+    routes: RouteRow[],
+    bestKey: string | null,
+    keyPrefix: string
+  ) {
+    return routes.map((row, index) => (
+      <FlightResultCard
+        key={`${keyPrefix}-${routeKey(row)}-${index}`}
+        row={row}
+        isBest={bestKey !== null && routeKey(row) === bestKey}
+      />
+    ));
   }
 
   return (
@@ -283,15 +292,11 @@ export default function HomePage() {
 
           <div className="mt-10">
             <FlightSearchWidget
-              tab={tab}
               form={form}
               loading={loading}
-              quickPromos={QUICK_PROMOS}
-              onTabChange={setTab}
               onFormChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
               onSubmit={submit}
               onSwapAirports={swapAirports}
-              onApplyPromo={applyPromo}
             />
           </div>
 
@@ -351,11 +356,10 @@ export default function HomePage() {
                 <Button
                   variant="outline"
                   onClick={() => {
-                    setTab("recommend");
-                    void runSearch("recommend");
+                    void runSearch(true);
                   }}
                 >
-                  View all smart picks
+                  Search this route
                 </Button>
               </div>
 
@@ -453,9 +457,14 @@ export default function HomePage() {
                 <p className="text-sm font-semibold uppercase tracking-wider text-cerulean-700">Results</p>
                 <h2 className="mt-2 text-3xl font-bold tracking-tight text-zinc-900">
                   {form.dep_airport} → {form.arr_airport}
+                  {searchResults?.journeyType === "round_trip" ? ` · Round-trip` : ""}
                 </h2>
                 <p className="mt-1 text-zinc-500">
-                  {form.flight_date} · {form.class_name} · {routes.length} result{routes.length === 1 ? "" : "s"}
+                  {form.flight_date}
+                  {searchResults?.journeyType === "round_trip" ? ` → ${form.return_date}` : ""}
+                  {form.class_name ? ` · ${form.class_name}` : " · All classes"}
+                  {form.max_price ? ` · Max $${form.max_price}` : ""}
+                  {form.apply_promotions ? " · Promotions only" : ""}
                 </p>
               </div>
               <Button variant="ghost" onClick={() => setHasSearched(false)}>
@@ -463,60 +472,53 @@ export default function HomePage() {
               </Button>
             </div>
 
-            {routes.length > 0 && tab !== "promotions" && (
-              <div className="mb-6 flex flex-wrap gap-2">
-                {(
-                  [
-                    ["all", "All"],
-                    ["direct", "Direct only"],
-                    ["connections", "1+ stops"]
-                  ] as const
-                ).map(([key, label]) => {
-                  const count =
-                    key === "direct"
-                      ? routes.filter((r) => !isConnectingRoute(r)).length
-                      : key === "connections"
-                        ? routes.filter((r) => isConnectingRoute(r)).length
-                        : routes.length;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => setResultFilter(key)}
-                      className={cn(
-                        "rounded-full px-4 py-2 text-sm font-semibold transition",
-                        resultFilter === key
-                          ? "bg-deep-space-blue text-white shadow-sm"
-                          : "border border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300"
-                      )}
-                    >
-                      {label} ({count})
-                    </button>
-                  );
-                })}
+            {error && (
+              <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-700">{error}</div>
+            )}
+
+            {!error && !loading && searchResults?.noPromotionalDeals && (
+              <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+                No promotional deals available for this route/date.
               </div>
             )}
 
-            <div className="grid gap-4 lg:grid-cols-2">
-              {error && (
-                <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-700 lg:col-span-2">{error}</div>
-              )}
-              {!error && !loading && routes.length === 0 && (
-                <div className="rounded-2xl border border-zinc-100 bg-white p-8 text-center text-zinc-500 lg:col-span-2">
-                  {tab === "promotions"
-                    ? "No flights match this promotion code."
-                    : "No flights found. Try another date or destination."}
+            {!error && !loading && searchResults && searchResults.outbound.length === 0 && searchResults.return.length === 0 && !searchResults.noPromotionalDeals && (
+              <div className="rounded-2xl border border-zinc-100 bg-white p-8 text-center text-zinc-500">
+                No flights found. Try another date or destination.
+              </div>
+            )}
+
+            {searchResults && searchResults.outbound.length > 0 && (
+              <div className="mb-10">
+                <h3 className="mb-4 text-lg font-semibold text-zinc-900">
+                  {searchResults.journeyType === "round_trip" ? "Outbound flights" : "Flights"}
+                  <span className="ml-2 text-sm font-normal text-zinc-500">
+                    ({searchResults.outbound.length} result{searchResults.outbound.length === 1 ? "" : "s"})
+                  </span>
+                </h3>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {renderResultCards(
+                    searchResults.outbound,
+                    searchResults.bestOutboundKey,
+                    "outbound"
+                  )}
                 </div>
-              )}
-              {!error && !loading && routes.length > 0 && visibleRoutes.length === 0 && (
-                <div className="rounded-2xl border border-zinc-100 bg-white p-8 text-center text-zinc-500 lg:col-span-2">
-                  No flights match this filter. Try &quot;All&quot; or another tab.
+              </div>
+            )}
+
+            {searchResults && searchResults.journeyType === "round_trip" && searchResults.return.length > 0 && (
+              <div>
+                <h3 className="mb-4 text-lg font-semibold text-zinc-900">
+                  Return flights
+                  <span className="ml-2 text-sm font-normal text-zinc-500">
+                    ({searchResults.return.length} result{searchResults.return.length === 1 ? "" : "s"})
+                  </span>
+                </h3>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {renderResultCards(searchResults.return, searchResults.bestReturnKey, "return")}
                 </div>
-              )}
-              {visibleRoutes.map((row, index) => (
-                <FlightResultCard key={`${flightIdOf(row)}-${index}`} row={row} index={index} />
-              ))}
-            </div>
+              </div>
+            )}
           </div>
         </section>
       )}

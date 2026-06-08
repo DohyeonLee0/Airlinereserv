@@ -1,7 +1,14 @@
 import { NextRequest } from "next/server";
 import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
-import { isConnectingRoute, normalizeRouteRows } from "@/lib/routeSearch";
+import {
+  attachRecommendationScores,
+  hasActivePromotion,
+  promoRowsToRoutes,
+  sortSearchResults,
+  type JourneyType
+} from "@/lib/flightSearch";
+import { isConnectingRoute, normalizeRouteRows, type RouteRow } from "@/lib/routeSearch";
 import { badRequest, conflict, created, dbErrorMessage, forbidden, isConflictDbError, ok, readJson, requiredParams, serverError, unauthorized } from "./http";
 
 type SearchMode = "basic" | "advanced" | "promotions" | "connecting";
@@ -51,9 +58,10 @@ async function runSearch(request: NextRequest, mode: SearchMode) {
   const maxPrice = nullableNumber(parsed.values.get("max_price"));
   const shared = [parsed.values.get("dep_airport"), parsed.values.get("arr_airport"), parsed.values.get("flight_date")];
 
+  const flightSearchParams = [...shared, classId, maxPrice];
   const map = {
-    basic: { sql: "CALL search_flights(?, ?, ?)", params: shared },
-    advanced: { sql: "CALL advanced_search_flights(?, ?, ?, ?, ?)", params: [...shared, classId, maxPrice] },
+    basic: { sql: "CALL search_flights(?, ?, ?, ?, ?)", params: flightSearchParams },
+    advanced: { sql: "CALL search_flights(?, ?, ?, ?, ?)", params: flightSearchParams },
     connecting: { sql: "CALL search_direct_and_connecting_flights(?, ?, ?, ?)", params: [...shared, classId] }
   } satisfies Record<Exclude<SearchMode, "promotions">, { sql: string; params: unknown[] }>;
 
@@ -70,8 +78,189 @@ async function runSearch(request: NextRequest, mode: SearchMode) {
   }
 }
 
+async function fetchRecommendationScores(
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null
+): Promise<RouteRow[]> {
+  const rows = await callProcedure("CALL recommend_routes(?, ?, ?, ?)", [
+    depAirport,
+    arrAirport,
+    flightDate,
+    classId
+  ]);
+  return normalizeRouteRows(rows);
+}
+
+async function searchPromoRoutes(
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null,
+  maxPrice: number | null
+): Promise<RouteRow[]> {
+  const rows = await callProcedure("CALL search_flights_with_promo_code(?, ?, ?, ?, ?, ?)", [
+    depAirport,
+    arrAirport,
+    flightDate,
+    classId,
+    maxPrice,
+    null
+  ]);
+  return promoRowsToRoutes(rows).filter(hasActivePromotion);
+}
+
+async function searchDirectRoutes(
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null,
+  maxPrice: number | null
+): Promise<RouteRow[]> {
+  const rows = await callProcedure("CALL search_flights(?, ?, ?, ?, ?)", [
+    depAirport,
+    arrAirport,
+    flightDate,
+    classId,
+    maxPrice
+  ]);
+  return normalizeRouteRows(rows);
+}
+
+async function searchDirectAndConnectingRoutes(
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null
+): Promise<RouteRow[]> {
+  const rows = await callProcedure("CALL search_direct_and_connecting_flights(?, ?, ?, ?)", [
+    depAirport,
+    arrAirport,
+    flightDate,
+    classId
+  ]);
+  return normalizeRouteRows(rows);
+}
+
+async function scoreAndSortRoutes(
+  routes: RouteRow[],
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null
+) {
+  const recommended = await fetchRecommendationScores(depAirport, arrAirport, flightDate, classId);
+  const scored = attachRecommendationScores(routes, recommended);
+  const { sorted, bestKey } = sortSearchResults(scored);
+  return { routes: sorted, bestKey };
+}
+
+async function searchLeg(
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null,
+  maxPrice: number | null,
+  journeyType: JourneyType,
+  applyPromotions: boolean
+) {
+  let routes: RouteRow[];
+
+  if (applyPromotions) {
+    routes = await searchPromoRoutes(depAirport, arrAirport, flightDate, classId, maxPrice);
+  } else if (journeyType === "round_trip") {
+    routes = await searchDirectRoutes(depAirport, arrAirport, flightDate, classId, maxPrice);
+  } else {
+    const [directRoutes, connectingCandidates] = await Promise.all([
+      searchDirectRoutes(depAirport, arrAirport, flightDate, classId, maxPrice),
+      searchDirectAndConnectingRoutes(depAirport, arrAirport, flightDate, classId)
+    ]);
+    let connectingRoutes = connectingCandidates.filter((row) => isConnectingRoute(row));
+    if (maxPrice !== null) {
+      connectingRoutes = connectingRoutes.filter((row) => {
+        const price = row.total_lowest_price ?? row.lowest_price ?? 0;
+        return price <= maxPrice;
+      });
+    }
+    routes = [...directRoutes, ...connectingRoutes];
+  }
+
+  return scoreAndSortRoutes(routes, depAirport, arrAirport, flightDate, classId);
+}
+
+export async function searchUnifiedFlights(request: NextRequest) {
+  const parsed = requiredParams(request, ["dep_airport", "arr_airport", "flight_date"]);
+  if (parsed.error || !parsed.values) return parsed.error;
+
+  const depAirport = parsed.values.get("dep_airport")!;
+  const arrAirport = parsed.values.get("arr_airport")!;
+  const flightDate = parsed.values.get("flight_date")!;
+  const returnDate = parsed.values.get("return_date");
+  const journeyType = (parsed.values.get("journey_type") ?? "one_way") as JourneyType;
+  const applyPromotions = parsed.values.get("apply_promotions") === "true";
+  const classId = classIdFromQuery(parsed.values.get("class_id"), parsed.values.get("class_name"));
+  const maxPrice = nullableNumber(parsed.values.get("max_price"));
+
+  if (journeyType === "round_trip" && !returnDate) {
+    return badRequest("Return date is required for round-trip searches.");
+  }
+  if (journeyType === "round_trip" && returnDate && returnDate < flightDate) {
+    return badRequest("Return date must be on or after the departure date.");
+  }
+
+  try {
+    const outbound = await searchLeg(
+      depAirport,
+      arrAirport,
+      flightDate,
+      classId,
+      maxPrice,
+      journeyType,
+      applyPromotions
+    );
+
+    if (journeyType === "round_trip" && returnDate) {
+      const inbound = await searchLeg(
+        arrAirport,
+        depAirport,
+        returnDate,
+        classId,
+        maxPrice,
+        journeyType,
+        applyPromotions
+      );
+
+      const noPromotionalDeals =
+        applyPromotions && outbound.routes.length === 0 && inbound.routes.length === 0;
+
+      return ok({
+        journeyType,
+        applyPromotions,
+        outbound: outbound.routes,
+        return: inbound.routes,
+        bestOutboundKey: outbound.bestKey,
+        bestReturnKey: inbound.bestKey,
+        noPromotionalDeals
+      });
+    }
+
+    const noPromotionalDeals = applyPromotions && outbound.routes.length === 0;
+
+    return ok({
+      journeyType,
+      applyPromotions,
+      routes: outbound.routes,
+      bestRouteKey: outbound.bestKey,
+      noPromotionalDeals
+    });
+  } catch (error) {
+    return serverError(error);
+  }
+}
+
 export function searchFlights(request: NextRequest) {
-  return runSearch(request, "connecting");
+  return searchUnifiedFlights(request);
 }
 
 export function searchBasicFlights(request: NextRequest) {

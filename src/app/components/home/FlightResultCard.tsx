@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Plane, Tag } from "lucide-react";
+import { Plane, Sparkles, Tag } from "lucide-react";
 import { cn } from "@/lib/cn";
 import {
   flightIdsOf,
@@ -11,8 +11,15 @@ import {
   type RouteRow
 } from "@/lib/routeSearch";
 
-export default function FlightResultCard({ row, index }: { row: RouteRow; index: number }) {
-  const isDeal = Boolean(row.applied_promo_code || row.discount_percent);
+function formatTime(value?: string) {
+  if (!value) return "";
+  return String(value).slice(0, 5);
+}
+
+export default function FlightResultCard({ row, isBest = false }: { row: RouteRow; isBest?: boolean }) {
+  const isDeal = Boolean(
+    (row.applied_promo_code && row.applied_promo_code !== "NO_PROMO") || row.discount_percent
+  );
   const flightNumbers = flightNumbersOf(row);
 
   return (
@@ -25,13 +32,19 @@ export default function FlightResultCard({ row, index }: { row: RouteRow; index:
       <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
+            {isBest ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-cerulean-500 px-2.5 py-1 text-xs font-semibold text-white">
+                <Sparkles className="size-3" strokeWidth={1.75} />
+                Best
+              </span>
+            ) : null}
             <span
               className={cn(
                 "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold",
                 isDeal ? "bg-emerald-50 text-emerald-800" : "bg-zinc-100 text-zinc-700"
               )}
             >
-              {row.applied_promo_code ? (
+              {isDeal && row.applied_promo_code ? (
                 <>
                   <Tag className="size-3" strokeWidth={1.75} />
                   {row.applied_promo_code}
@@ -40,16 +53,18 @@ export default function FlightResultCard({ row, index }: { row: RouteRow; index:
                 stopLabel(row)
               )}
             </span>
-            {index === 0 ? (
-              <span className="rounded-full bg-deep-space-blue px-2.5 py-1 text-xs font-semibold text-white">Best match</span>
-            ) : null}
           </div>
 
           <h3 className="mt-3 text-xl font-semibold tracking-tight text-zinc-900">{routeLabel(row)}</h3>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-zinc-500">
             <Plane className="size-3.5 shrink-0" strokeWidth={1.75} />
-            {flightNumbers.join(" · ")}
+            {row.airline_name ?? "Airline"} · {flightNumbers.join(" · ")}
           </p>
+          {(row.dep_time || row.arr_time) && (
+            <p className="mt-1 text-sm text-zinc-500">
+              {formatTime(row.dep_time)} → {formatTime(row.arr_time)}
+            </p>
+          )}
           {flightIdsOf(row).length > 1 ? (
             <p className="mt-1 text-xs text-zinc-400">{flightIdsOf(row).length} legs · select a seat for each</p>
           ) : null}
@@ -57,7 +72,10 @@ export default function FlightResultCard({ row, index }: { row: RouteRow; index:
           {row.recommendation_score !== undefined ? (
             <p className="mt-2 text-xs font-semibold text-cerulean-700">Smart score · {row.recommendation_score}</p>
           ) : null}
-          <p className="mt-2 text-xs text-zinc-400">{row.available_seats} seats remaining</p>
+          <p className="mt-2 text-xs text-zinc-400">
+            {row.class_name ? `${row.class_name} · ` : ""}
+            {row.available_seats} seats remaining
+          </p>
         </div>
 
         <div className="flex shrink-0 flex-row items-center justify-between gap-4 sm:flex-col sm:items-end">

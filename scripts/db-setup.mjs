@@ -195,20 +195,26 @@ try {
       CASE
         WHEN s.class_id = 3 THEN
           CASE
-            WHEN fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 5200.00
-            WHEN fs.arr_airport IN ('SIN', 'BKK', 'HKG') THEN 2600.00
+            WHEN fs.dep_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG')
+              OR fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 5200.00
+            WHEN fs.dep_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX')
+              OR fs.arr_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX') THEN 2600.00
             ELSE 1600.00
           END
         WHEN s.class_id = 2 THEN
           CASE
-            WHEN fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 2400.00
-            WHEN fs.arr_airport IN ('SIN', 'BKK', 'HKG') THEN 980.00
+            WHEN fs.dep_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG')
+              OR fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 2400.00
+            WHEN fs.dep_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX')
+              OR fs.arr_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX') THEN 980.00
             ELSE 620.00
           END
         ELSE
           CASE
-            WHEN fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 780.00
-            WHEN fs.arr_airport IN ('SIN', 'BKK', 'HKG') THEN 360.00
+            WHEN fs.dep_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG')
+              OR fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 780.00
+            WHEN fs.dep_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX')
+              OR fs.arr_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX') THEN 360.00
             ELSE 210.00
           END
       END AS price

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Plane } from "lucide-react";
 import Button from "@/app/components/ui/Button";
+import { AUTH_CHANGED_EVENT } from "@/lib/authEvents";
 import { isStaffRole } from "@/lib/roles";
 import { cn } from "@/lib/cn";
 
@@ -18,13 +19,27 @@ export default function SiteHeader() {
   const [user, setUser] = useState<SessionUser | null>(null);
 
   useEffect(() => {
-    fetch("/api/auth/me")
-      .then((res) => res.json())
-      .then((json) => {
-        if (json.success) setUser(json.data.user);
-      })
-      .catch(() => undefined);
-  }, []);
+    let cancelled = false;
+
+    async function loadUser() {
+      try {
+        const res = await fetch("/api/auth/me");
+        const json = await res.json();
+        if (!cancelled) {
+          setUser(json.success ? json.data.user : null);
+        }
+      } catch {
+        if (!cancelled) setUser(null);
+      }
+    }
+
+    void loadUser();
+    window.addEventListener(AUTH_CHANGED_EVENT, loadUser);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(AUTH_CHANGED_EVENT, loadUser);
+    };
+  }, [pathname]);
 
   if (pathname?.startsWith("/dashboard")) {
     return null;

@@ -1,5 +1,9 @@
 export type RouteRow = {
   route_type?: string;
+  airline_name?: string;
+  class_name?: string;
+  dep_time?: string;
+  arr_time?: string;
   flight_id?: number;
   first_flight_id?: number;
   second_flight_id?: number | null;
@@ -118,8 +122,15 @@ export function normalizeRouteRow(row: Record<string, unknown>): RouteRow {
     stop_count: row.stop_count as number | undefined
   });
 
+  const depTime = base.dep_time ?? (row.first_dep_time as string | undefined);
+  const arrTime =
+    base.arr_time ?? (row.second_arr_time as string | undefined) ?? (row.first_arr_time as string | undefined);
+
   return {
     ...base,
+    route_type: base.route_type ?? (stops > 0 ? "ONE_STOP" : "DIRECT"),
+    dep_time: depTime,
+    arr_time: arrTime,
     flight_ids: flightIds,
     flight_numbers: flightNumbers,
     connection_airports: hubs.length ? hubs.join(",") : base.connection_airports ?? null,
@@ -128,7 +139,8 @@ export function normalizeRouteRow(row: Record<string, unknown>): RouteRow {
     first_flight_id: flightIds[0] ?? base.first_flight_id,
     second_flight_id: flightIds[1] ?? base.second_flight_id ?? null,
     first_flight_number: flightNumbers[0] ?? base.first_flight_number,
-    second_flight_number: flightNumbers[1] ?? base.second_flight_number ?? null
+    second_flight_number: flightNumbers[1] ?? base.second_flight_number ?? null,
+    total_lowest_price: base.total_lowest_price ?? base.lowest_price
   };
 }
 

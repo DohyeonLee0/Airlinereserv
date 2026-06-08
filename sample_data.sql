@@ -214,16 +214,34 @@ VALUES
 (9,  'AF', 'AF267', 'ICN', 'CDG', '12:15:00', '19:30:00', '2026-06-01', '2026-06-30'),
 (10, 'JL', 'JL5206', 'ICN', 'KIX', '13:10:00', '15:00:00', '2026-06-01', '2026-06-30'),
 (11, 'KE', 'KE651', 'ICN', 'BKK', '17:20:00', '21:10:00', '2026-06-01', '2026-06-30'),
-(12, 'OZ', 'OZ721', 'ICN', 'HKG', '09:00:00', '11:45:00', '2026-06-01', '2026-06-30');
+(12, 'OZ', 'OZ721', 'ICN', 'HKG', '09:00:00', '11:45:00', '2026-06-01', '2026-06-30'),
+-- Return legs for round-trip demo searches (direct only)
+(13, 'KE', 'KE082', 'JFK', 'ICN', '14:00:00', '18:00:00', '2026-06-01', '2026-06-30'),
+(14, 'KE', 'KE704', 'NRT', 'ICN', '12:30:00', '15:00:00', '2026-06-01', '2026-06-30'),
+(15, 'SQ', 'SQ608', 'SIN', 'ICN', '15:30:00', '21:00:00', '2026-06-01', '2026-06-30'),
+(16, 'AF', 'AF268', 'CDG', 'ICN', '11:00:00', '06:00:00', '2026-06-01', '2026-06-30'),
+(17, 'OZ', 'OZ203', 'LAX', 'ICN', '11:30:00', '16:00:00', '2026-06-01', '2026-06-30'),
+(18, 'KE', 'KE652', 'BKK', 'ICN', '08:00:00', '13:00:00', '2026-06-01', '2026-06-30');
 
 -- 2026-06-01 is Monday. These demo schedules operate Mon/Wed/Fri.
 INSERT INTO schedule_days (schedule_id, day_of_week)
 SELECT schedule_id, day_of_week
 FROM flight_schedules
+WHERE schedule_id <= 12
 CROSS JOIN (
     SELECT 'MON' AS day_of_week UNION ALL
     SELECT 'WED' UNION ALL
     SELECT 'FRI'
+) days;
+
+INSERT INTO schedule_days (schedule_id, day_of_week)
+SELECT schedule_id, day_of_week
+FROM flight_schedules
+WHERE schedule_id BETWEEN 13 AND 18
+CROSS JOIN (
+    SELECT 'TUE' AS day_of_week UNION ALL
+    SELECT 'THU' UNION ALL
+    SELECT 'SAT'
 ) days;
 
 -- ============================================================
@@ -306,6 +324,41 @@ VALUES
 (1030, 6030, 9, '2026-06-15', 701, 1, 'Outbound', 'Scheduled');
 
 -- ============================================================
+-- RETURN LEG FLIGHTS (round-trip demo — direct inbound to ICN)
+-- Operate Tue/Thu/Sat; pair with outbound ICN routes in the UI.
+-- ============================================================
+
+INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
+VALUES
+(6101, 'RoundTrip', 'JFK', 'ICN'),
+(6102, 'RoundTrip', 'JFK', 'ICN'),
+(6103, 'RoundTrip', 'JFK', 'ICN'),
+(6104, 'RoundTrip', 'JFK', 'ICN'),
+(6105, 'RoundTrip', 'JFK', 'ICN'),
+(6106, 'RoundTrip', 'JFK', 'ICN'),
+(6107, 'RoundTrip', 'JFK', 'ICN'),
+(6121, 'RoundTrip', 'NRT', 'ICN'),
+(6122, 'RoundTrip', 'SIN', 'ICN'),
+(6123, 'RoundTrip', 'CDG', 'ICN'),
+(6124, 'RoundTrip', 'LAX', 'ICN'),
+(6125, 'RoundTrip', 'BKK', 'ICN');
+
+INSERT INTO flights (flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status)
+VALUES
+(1101, 6101, 13, '2026-06-03', 101, 1, 'Return', 'Scheduled'),
+(1102, 6102, 13, '2026-06-10', 101, 1, 'Return', 'Scheduled'),
+(1103, 6103, 13, '2026-06-12', 101, 1, 'Return', 'Scheduled'),
+(1104, 6104, 13, '2026-06-14', 101, 1, 'Return', 'Scheduled'),
+(1105, 6105, 13, '2026-06-17', 101, 1, 'Return', 'Scheduled'),
+(1106, 6106, 13, '2026-06-19', 101, 1, 'Return', 'Scheduled'),
+(1107, 6107, 13, '2026-06-24', 101, 1, 'Return', 'Scheduled'),
+(1121, 6121, 14, '2026-06-12', 101, 1, 'Return', 'Scheduled'),
+(1122, 6122, 15, '2026-06-13', 601, 1, 'Return', 'Scheduled'),
+(1123, 6123, 16, '2026-06-15', 701, 1, 'Return', 'Scheduled'),
+(1124, 6124, 17, '2026-06-12', 201, 1, 'Return', 'Scheduled'),
+(1125, 6125, 18, '2026-06-13', 102, 1, 'Return', 'Scheduled');
+
+-- ============================================================
 -- 12-MONTH REVENUE DEMO FLIGHTS (Jul 2025 – May 2026)
 -- One KE081 ICN→JFK per month; June 2026 uses flights 1001+ above.
 -- ============================================================
@@ -352,20 +405,26 @@ SELECT
     CASE
         WHEN s.class_id = 3 THEN
             CASE
-                WHEN fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 5200.00
-                WHEN fs.arr_airport IN ('SIN', 'BKK', 'HKG') THEN 2600.00
+                WHEN fs.dep_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG')
+                  OR fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 5200.00
+                WHEN fs.dep_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX')
+                  OR fs.arr_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX') THEN 2600.00
                 ELSE 1600.00
             END
         WHEN s.class_id = 2 THEN
             CASE
-                WHEN fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 2400.00
-                WHEN fs.arr_airport IN ('SIN', 'BKK', 'HKG') THEN 980.00
+                WHEN fs.dep_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG')
+                  OR fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 2400.00
+                WHEN fs.dep_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX')
+                  OR fs.arr_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX') THEN 980.00
                 ELSE 620.00
             END
         ELSE
             CASE
-                WHEN fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 780.00
-                WHEN fs.arr_airport IN ('SIN', 'BKK', 'HKG') THEN 360.00
+                WHEN fs.dep_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG')
+                  OR fs.arr_airport IN ('JFK', 'LAX', 'SFO', 'SEA', 'CDG') THEN 780.00
+                WHEN fs.dep_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX')
+                  OR fs.arr_airport IN ('SIN', 'BKK', 'HKG', 'NRT', 'KIX') THEN 360.00
                 ELSE 210.00
             END
     END AS price
