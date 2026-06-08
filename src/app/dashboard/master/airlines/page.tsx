@@ -6,14 +6,14 @@ import { PageTitle } from "@/app/components/dashboard/PageTitle";
 import { masterInputClass, MasterFormField } from "@/app/components/dashboard/master/MasterFormField";
 import MasterRecordTable from "@/app/components/dashboard/master/MasterRecordTable";
 import { useMasterLists, type AirlineRow } from "@/app/components/dashboard/master/useMasterLists";
-import { StaffMessage, useStaffAction } from "@/app/components/dashboard/useStaffAction";
+import { StaffAlertModal, useStaffAction } from "@/app/components/dashboard/useStaffAction";
 import { COUNTRY_OPTIONS } from "@/lib/masterDataOptions";
 
 const formCardClass = "rounded-2xl border border-zinc-200/80 bg-white p-5 shadow-sm";
 
 export default function AirlinesMasterPage() {
   const { airlines, countryOptions, loading, error, reload } = useMasterLists({ airlines: true });
-  const { message, postJson, deleteJson, setMessage } = useStaffAction(reload);
+  const { alert, clearAlert, postJson, deleteJson } = useStaffAction(reload);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [form, setForm] = useState({ airline_id: "", airline_name: "", country: "" });
 
@@ -23,8 +23,8 @@ export default function AirlinesMasterPage() {
   );
 
   useEffect(() => {
-    setMessage("");
-  }, [selectedKey, setMessage]);
+    clearAlert();
+  }, [selectedKey, clearAlert]);
 
   function startNew() {
     setSelectedKey(null);
@@ -66,7 +66,7 @@ export default function AirlinesMasterPage() {
       />
 
       {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
-      <StaffMessage message={message} />
+      <StaffAlertModal alert={alert} onClose={clearAlert} />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,380px)_1fr]">
         <form onSubmit={handleSubmit} className={formCardClass}>

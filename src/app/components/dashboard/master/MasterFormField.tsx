@@ -10,7 +10,7 @@ export function MasterFormField({
   children
 }: {
   label: string;
-  hint?: string;
+  hint?: ReactNode;
   required?: boolean;
   children: ReactNode;
 }) {

@@ -1,20 +1,48 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { cn } from "@/lib/cn";
+import { FormEvent, useCallback, useState } from "react";
+import { StaffAlertModal, type StaffAlertState, type StaffAlertVariant } from "./StaffAlertModal";
+
+type PostJsonOptions = {
+  silentSuccess?: boolean;
+};
 
 export function useStaffAction(onSuccess?: () => void | Promise<void>) {
-  const [message, setMessage] = useState("");
+  const [alert, setAlert] = useState<StaffAlertState | null>(null);
 
-  async function postJson(endpoint: string, body: Record<string, unknown>, method = "POST") {
+  const clearAlert = useCallback(() => setAlert(null), []);
+
+  const showAlert = useCallback(
+    (message: string, options?: { title?: string; variant?: StaffAlertVariant }) => {
+      setAlert({
+        message,
+        title: options?.title,
+        variant: options?.variant ?? "error"
+      });
+    },
+    []
+  );
+
+  async function postJson(
+    endpoint: string,
+    body: Record<string, unknown>,
+    method = "POST",
+    options?: PostJsonOptions
+  ) {
     const response = await fetch(endpoint, {
       method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
     const json = await response.json();
-    const message = response.ok ? "Completed successfully." : json.message ?? "Request failed";
-    setMessage(message);
+    const message = json.message ?? (response.ok ? "Completed successfully." : "Request failed");
+
+    if (!response.ok) {
+      showAlert(message, { title: "Request failed" });
+    } else if (!options?.silentSuccess) {
+      showAlert(message, { title: "Success", variant: "success" });
+    }
+
     if (response.ok && onSuccess) await onSuccess();
     return { ok: response.ok, data: response.ok ? json.data : undefined, message };
   }
@@ -31,27 +59,18 @@ export function useStaffAction(onSuccess?: () => void | Promise<void>) {
       body: JSON.stringify(body)
     });
     const json = await response.json();
-    setMessage(response.ok ? "Deleted successfully." : json.message ?? "Delete failed");
+    const message = json.message ?? (response.ok ? "Deleted successfully." : "Delete failed");
+
+    if (!response.ok) {
+      showAlert(message, { title: "Delete failed" });
+    } else {
+      showAlert(message, { title: "Deleted", variant: "success" });
+    }
+
     if (response.ok && onSuccess) await onSuccess();
   }
 
-  return { message, setMessage, postJson, postForm, deleteJson };
+  return { alert, showAlert, clearAlert, postJson, postForm, deleteJson };
 }
 
-export function StaffMessage({ message }: { message: string }) {
-  if (!message) return null;
-  const isError =
-    message !== "Completed successfully." &&
-    message !== "Deleted successfully." &&
-    !message.endsWith(" successfully.");
-  return (
-    <div
-      className={cn(
-        "rounded-xl border px-4 py-3 text-sm shadow-sm",
-        isError ? "border-red-200 bg-red-50 text-red-800" : "border-zinc-200/80 bg-white text-zinc-700"
-      )}
-    >
-      {message}
-    </div>
-  );
-}
+export { StaffAlertModal };

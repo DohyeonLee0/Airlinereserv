@@ -16,6 +16,8 @@ export type ScheduleRow = {
   arr_time: string;
   valid_from: string;
   valid_to: string;
+  operating_days?: unknown;
+  generated_flight_count?: number;
 };
 
 async function fetchRows<T>(endpoint: string): Promise<T[]> {

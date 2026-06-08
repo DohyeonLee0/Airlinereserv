@@ -17,6 +17,7 @@ export type DirectRegistrationDetail = {
   arr_time: string;
   valid_from: string;
   valid_to: string;
+  operating_days: string[];
 };
 
 export type ConnectingLegDetail = {
@@ -45,12 +46,15 @@ export type ConnectingRegistrationDetail = {
 
 export type GeneratedFlightsDetail = {
   kind: "generated";
-  itinerary_id: number;
+  route_type: "direct" | "connecting";
+  schedule_id?: number;
+  itinerary_id?: number;
   route_label: string;
+  flight_number?: string;
   start_date: string;
   end_date: string;
   generated_flights: number;
-  legs: ConnectingLegDetail[];
+  legs?: ConnectingLegDetail[];
 };
 
 export type RegistrationSuccessDetail =
@@ -73,15 +77,15 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 }
 
 function titleForDetail(detail: RegistrationSuccessDetail) {
-  if (detail.kind === "direct") return "Direct schedule registered";
-  if (detail.kind === "connecting") return "Connecting route registered";
-  return "Connecting flights generated";
+  if (detail.kind === "direct") return "Direct schedule saved";
+  if (detail.kind === "connecting") return "Connecting itinerary saved";
+  return detail.route_type === "direct" ? "Direct flights generated" : "Connecting flights generated";
 }
 
 function subtitleForDetail(detail: RegistrationSuccessDetail) {
-  if (detail.kind === "direct") return "The recurring leg was saved to flight_schedules.";
+  if (detail.kind === "direct") return "The recurring leg and operating days were saved.";
   if (detail.kind === "connecting") return "Itinerary and schedule legs were saved successfully.";
-  return "Dated flights were created for the selected date range.";
+  return "Dated flights with seats and prices were created for the selected range.";
 }
 
 export function RegistrationSuccessModal({ detail, onClose }: RegistrationSuccessModalProps) {
@@ -142,6 +146,7 @@ export function RegistrationSuccessModal({ detail, onClose }: RegistrationSucces
               <DetailRow label="Route" value={`${detail.dep_airport} → ${detail.arr_airport}`} />
               <DetailRow label="Times" value={`${detail.dep_time} – ${detail.arr_time}`} />
               <DetailRow label="Valid period" value={`${detail.valid_from} → ${detail.valid_to}`} />
+              <DetailRow label="Operating days" value={detail.operating_days.join(", ")} />
             </dl>
           ) : null}
 
@@ -181,25 +186,34 @@ export function RegistrationSuccessModal({ detail, onClose }: RegistrationSucces
           {detail.kind === "generated" ? (
             <div className="space-y-4">
               <dl className="space-y-3">
-                <DetailRow label="Itinerary ID" value={`#${detail.itinerary_id}`} />
+                {detail.route_type === "direct" ? (
+                  <>
+                    <DetailRow label="Schedule ID" value={`#${detail.schedule_id}`} />
+                    {detail.flight_number ? <DetailRow label="Flight" value={detail.flight_number} /> : null}
+                  </>
+                ) : (
+                  <DetailRow label="Itinerary ID" value={`#${detail.itinerary_id}`} />
+                )}
                 <DetailRow label="Route" value={detail.route_label} />
                 <DetailRow label="Date range" value={`${detail.start_date} → ${detail.end_date}`} />
                 <DetailRow label="Flights created" value={`${detail.generated_flights}`} />
               </dl>
 
-              <div className="space-y-2">
-                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">Legs per operating day</p>
-                {detail.legs.map((leg) => (
-                  <div key={leg.schedule_id} className="rounded-xl border border-cerulean-100 bg-cerulean-50/50 px-3 py-2.5 text-sm">
-                    <p className="font-semibold text-zinc-900">
-                      Leg {leg.leg_index} · {leg.flight_number}
-                    </p>
-                    <p className="mt-1 text-zinc-700">
-                      {leg.dep_airport} → {leg.arr_airport} · Schedule #{leg.schedule_id}
-                    </p>
-                  </div>
-                ))}
-              </div>
+              {detail.legs?.length ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">Legs per operating day</p>
+                  {detail.legs.map((leg) => (
+                    <div key={leg.schedule_id} className="rounded-xl border border-cerulean-100 bg-cerulean-50/50 px-3 py-2.5 text-sm">
+                      <p className="font-semibold text-zinc-900">
+                        Leg {leg.leg_index} · {leg.flight_number}
+                      </p>
+                      <p className="mt-1 text-zinc-700">
+                        {leg.dep_airport} → {leg.arr_airport} · Schedule #{leg.schedule_id}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
