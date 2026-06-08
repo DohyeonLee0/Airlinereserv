@@ -24,6 +24,13 @@ function statusStyle(status: string) {
   return "bg-amber-50 text-amber-800 ring-amber-200";
 }
 
+function bookingRouteLabel(booking: BookingGroup) {
+  if (booking.trip_type === "RoundTrip") {
+    return `${booking.departure_airport_code} ↔ ${booking.arrival_airport_code}`;
+  }
+  return `${booking.departure_airport_code} → ${booking.arrival_airport_code}`;
+}
+
 export default function BookingsPage() {
   const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [message, setMessage] = useState("");
@@ -174,7 +181,7 @@ export default function BookingsPage() {
               <Search className="mx-auto size-9 text-zinc-300" strokeWidth={1.5} />
               <h2 className="mt-4 text-lg font-semibold text-zinc-900">No matching bookings</h2>
               <p className="mx-auto mt-2 max-w-md text-sm text-zinc-500">
-                Try a different search term or adjust the departure date range.
+                Try a different search term, trip type, or adjust the departure date range.
               </p>
               <Button type="button" variant="outline" size="sm" className="mt-4" onClick={clearFilters}>
                 Clear filters
@@ -232,7 +239,7 @@ function BookingCard({ booking, expanded, loadingId, onToggleExpand, onCancel }:
             ) : null}
           </div>
           <p className="mt-1 text-base font-medium text-zinc-800">
-            {booking.departure_airport_code} → {booking.arrival_airport_code}
+            {bookingRouteLabel(booking)}
             <span className="ml-2 text-sm font-normal text-zinc-500">({booking.trip_type})</span>
           </p>
           <p className="mt-2 flex items-center gap-1.5 text-sm text-zinc-500">

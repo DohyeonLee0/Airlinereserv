@@ -100,15 +100,54 @@ export function routeLabel(row: RouteRow): string {
   return `${row.dep_airport} → ${row.arr_airport}`;
 }
 
-export function seatHref(row: RouteRow): string {
+function appendClassFilter(url: string, seatClassFilter?: string | null): string {
+  const cls = seatClassFilter?.trim();
+  if (!cls) return url;
+  return `${url}&class_name=${encodeURIComponent(cls)}`;
+}
+
+export function seatHref(row: RouteRow, seatClassFilter?: string | null): string {
   const ids = flightIdsOf(row);
-  if (ids.length > 1) return `/seats?flight_ids=${ids.join(",")}`;
-  if (ids.length === 1) return `/seats?flight_id=${ids[0]}`;
+  if (ids.length > 1) return appendClassFilter(`/seats?flight_ids=${ids.join(",")}`, seatClassFilter);
+  if (ids.length === 1) return appendClassFilter(`/seats?flight_id=${ids[0]}`, seatClassFilter);
   return "/seats";
+}
+
+export function primaryFlightId(row: RouteRow): number | null {
+  return flightIdsOf(row)[0] ?? row.flight_id ?? row.first_flight_id ?? null;
+}
+
+export function roundTripSeatsHref(
+  outbound: RouteRow,
+  returnRow: RouteRow,
+  seatClassFilter?: string | null
+): string {
+  const outId = primaryFlightId(outbound);
+  const retId = primaryFlightId(returnRow);
+  if (!outId || !retId) return "/seats";
+
+  let url = `/seats?flight_ids=${outId},${retId}&journey=round_trip`;
+  return appendClassFilter(url, seatClassFilter);
 }
 
 export function priceOf(row: RouteRow): number {
   return row.final_lowest_price ?? row.total_lowest_price ?? row.lowest_price ?? row.lowest_available_price ?? 0;
+}
+
+export function isApproximateFare(
+  row: RouteRow,
+  journeyType: "one_way" | "round_trip" = "one_way"
+): boolean {
+  if (journeyType !== "one_way") return false;
+  return isConnectingRoute(row) || !row.class_name?.trim();
+}
+
+export function priceLabelOf(
+  row: RouteRow,
+  journeyType: "one_way" | "round_trip" = "one_way"
+): string {
+  const formatted = priceOf(row).toLocaleString("en-US");
+  return isApproximateFare(row, journeyType) ? `${formatted} ~` : formatted;
 }
 
 export function normalizeRouteRow(row: Record<string, unknown>): RouteRow {

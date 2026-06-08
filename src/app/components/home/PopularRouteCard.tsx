@@ -7,6 +7,7 @@ export type PopularRouteCardProps = {
   city: string;
   country: string;
   price?: number;
+  priceApproximate?: boolean;
   score?: number;
   badge?: string;
   flightDate: string;
@@ -21,6 +22,7 @@ export default function PopularRouteCard({
   city,
   country,
   price,
+  priceApproximate = false,
   score,
   badge,
   onSelect,
@@ -44,7 +46,10 @@ export default function PopularRouteCard({
       <div className="mt-5 flex items-end justify-between gap-3 border-t border-zinc-100 pt-4">
         <div>
           {price !== undefined ? (
-            <p className="text-2xl font-bold tabular-nums text-zinc-900">${price.toLocaleString("en-US")}</p>
+            <p className="text-2xl font-bold tabular-nums text-zinc-900">
+              ${price.toLocaleString("en-US")}
+              {priceApproximate ? " ~" : ""}
+            </p>
           ) : (
             <p className="text-sm text-zinc-400">Fetching best fare…</p>
           )}

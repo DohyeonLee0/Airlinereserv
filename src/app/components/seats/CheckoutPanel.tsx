@@ -11,6 +11,8 @@ import type { Seat } from "@/app/components/seats/seatMapUtils";
 type CheckoutPanelProps = {
   selected: Seat | null;
   flightIds: string[];
+  selectedByFlight?: Record<string, Seat>;
+  isRoundTrip?: boolean;
   promotions: Promotion[];
   selectedPromo: string;
   paymentMethod: string;
@@ -42,6 +44,8 @@ type CheckoutPanelProps = {
 export default function CheckoutPanel({
   selected,
   flightIds,
+  selectedByFlight = {},
+  isRoundTrip = false,
   promotions,
   selectedPromo,
   paymentMethod,
@@ -55,7 +59,20 @@ export default function CheckoutPanel({
   onLoadLedger
 }: CheckoutPanelProps) {
   const discount = promotions.find((p) => p.promo_code === selectedPromo)?.discount_percent ?? 0;
-  const estimated = selected ? selected.price * (1 - discount / 100) : 0;
+  const allLegsSelected =
+    flightIds.length <= 1 || flightIds.every((id) => Boolean(selectedByFlight[id]));
+  const multiLegTotal = flightIds.reduce((sum, id) => {
+    const seat = selectedByFlight[id];
+    if (!seat) return sum;
+    const legDiscount =
+      id === String(selected?.flight_id) ? discount : 0;
+    return sum + seat.price * (1 - legDiscount / 100);
+  }, 0);
+  const estimated = selected
+    ? flightIds.length > 1
+      ? multiLegTotal
+      : selected.price * (1 - discount / 100)
+    : 0;
 
   return (
     <div className="space-y-4">
@@ -86,7 +103,45 @@ export default function CheckoutPanel({
           )}
         </div>
 
-        {selected && (
+        {flightIds.length > 1 && (
+          <div className="mt-4 rounded-xl border border-zinc-100 bg-zinc-50/80 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+              {isRoundTrip ? "Round-trip seats" : "All legs"}
+            </p>
+            <ul className="mt-2 space-y-2 text-sm">
+              {flightIds.map((id, index) => {
+                const seat = selectedByFlight[id];
+                return (
+                  <li key={id} className="flex justify-between gap-3 text-zinc-600">
+                    <span>
+                      {isRoundTrip ? (index === 0 ? "Outbound" : "Return") : `Leg ${index + 1}`} · Flight {id}
+                    </span>
+                    <span className="text-right font-medium text-zinc-900">
+                      {seat ? (
+                        <>
+                          {seat.seat_number} · {seat.class_name}
+                          <br />
+                          <span className="tabular-nums">${seat.price.toLocaleString("en-US")}</span>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {flightIds.length > 1 && allLegsSelected && (
+          <div className="mt-4 flex items-center justify-between rounded-xl border border-zinc-100 bg-zinc-50/80 px-4 py-3">
+            <span className="text-sm text-zinc-500">{labels.estimated}</span>
+            <span className="text-xl font-bold tabular-nums text-zinc-900">${estimated.toLocaleString("en-US")}</span>
+          </div>
+        )}
+
+        {selected && flightIds.length <= 1 && (
           <section className="mt-4 rounded-xl border border-zinc-100 p-4">
             <p className="inline-flex items-center gap-1.5 text-sm font-semibold text-zinc-900">
               <Tag className="size-3.5" strokeWidth={1.75} />
@@ -150,7 +205,7 @@ export default function CheckoutPanel({
           </label>
         </div>
 
-        <Button type="submit" size="lg" className="mt-5 w-full" disabled={!selected}>
+        <Button type="submit" size="lg" className="mt-5 w-full" disabled={!allLegsSelected || !selected}>
           {flightIds.length > 1 ? labels.checkout : labels.reserve}
         </Button>
 

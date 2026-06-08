@@ -18,6 +18,9 @@ const t = {
   load: "Reload seats",
   leg: "Leg",
   connectingNotice: "Connecting itinerary — choose one seat for each leg.",
+  roundTripNotice: "Round-trip — choose a seat for outbound and return.",
+  outboundLeg: "Outbound",
+  returnLeg: "Return",
   payment: "Payment",
   selectedSeat: "Selected seat",
   none: "Tap a seat on the map",
@@ -45,14 +48,40 @@ const t = {
   heldLabel: "Held",
   reservedLabel: "Taken",
   unavailable: "This seat is not available.",
+  wrongClass: "Not available at this fare.",
+  wrongFareLegend: "Not this fare",
   exit: "Exit",
   galley: "Galley",
   ledger: "Payment ledger",
   noLedger: "No ledger loaded. Complete a booking or enter a booking ID above.",
   selectedOnly: "Seat selected — confirm below to hold and book.",
+  classOnly: "Only {class} seats can be selected — matching the fare shown in search.",
+  classOnlyShort: "{class} class only",
   classNames: { Economy: "Economy", Business: "Business", First: "First" } as Record<SeatClass, string>,
   myBookings: "View all my bookings"
 };
+
+const SEAT_CLASSES: SeatClass[] = ["First", "Business", "Economy"];
+
+function parseSeatClass(value: string | null): SeatClass | null {
+  if (!value) return null;
+  return SEAT_CLASSES.includes(value as SeatClass) ? (value as SeatClass) : null;
+}
+
+function parseLegClassMap(
+  flightIds: string[],
+  classNamesParam: string | null,
+  fallbackClassName: string | null
+): Record<string, SeatClass | null> {
+  const parsed = (classNamesParam ?? "")
+    .split(",")
+    .map((value) => parseSeatClass(value.trim()));
+  const fallback = parseSeatClass(fallbackClassName);
+
+  return Object.fromEntries(
+    flightIds.map((id, index) => [id, parsed[index] ?? fallback ?? null])
+  );
+}
 
 function makeId() {
   return Math.floor(Date.now() % 1_000_000_000);
@@ -71,13 +100,21 @@ function bookingIdFromReserveResponse(data: unknown): number | null {
 
 function SeatsContent() {
   const params = useSearchParams();
+  const isRoundTrip = params.get("journey") === "round_trip";
   const initialFlightIds = (params.get("flight_ids") ?? params.get("flight_id") ?? "1001")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  const classNamesParam = params.get("class_names");
+  const classNameParam = params.get("class_name");
+  const selectableClassByFlight = useMemo(
+    () => parseLegClassMap(initialFlightIds, classNamesParam, classNameParam),
+    [initialFlightIds.join(","), classNamesParam, classNameParam]
+  );
   const [flightIds, setFlightIds] = useState(initialFlightIds);
   const [activeLegIndex, setActiveLegIndex] = useState(0);
   const activeFlightId = flightIds[activeLegIndex] ?? "1001";
+  const activeSelectableClass = selectableClassByFlight[activeFlightId] ?? null;
   const [flight, setFlight] = useState<FlightInfo | null>(null);
   const [seats, setSeats] = useState<Seat[]>([]);
   const [selected, setSelected] = useState<Seat | null>(null);
@@ -92,16 +129,19 @@ function SeatsContent() {
 
   const sections = useMemo(
     () =>
-      (["First", "Business", "Economy"] as SeatClass[])
-        .map((className) => ({ className, seats: seats.filter((seat) => seat.class_name === className) }))
-        .filter((section) => section.seats.length > 0),
+      SEAT_CLASSES.map((className) => ({ className, seats: seats.filter((seat) => seat.class_name === className) })).filter(
+        (section) => section.seats.length > 0
+      ),
     [seats]
   );
 
   const seatStats = useMemo(() => {
-    const available = seats.filter((s) => s.seat_status === "available").length;
-    return { available, total: seats.length };
-  }, [seats]);
+    const relevant = activeSelectableClass
+      ? seats.filter((seat) => seat.class_name === activeSelectableClass)
+      : seats;
+    const available = relevant.filter((s) => s.seat_status === "available").length;
+    return { available, total: relevant.length };
+  }, [seats, activeSelectableClass]);
 
   async function loadSeats(targetFlightId = activeFlightId) {
     await fetch("/api/flights/hold/release", { method: "POST" });
@@ -147,6 +187,8 @@ function SeatsContent() {
   }
 
   function chooseSeat(seat: Seat) {
+    const legClass = selectableClassByFlight[String(seat.flight_id)];
+    if (legClass && seat.class_name !== legClass) return;
     setBookingSuccess(null);
     setSelected(seat);
     setSelectedByFlight((prev) => ({ ...prev, [String(seat.flight_id)]: seat }));
@@ -197,7 +239,11 @@ function SeatsContent() {
     const response = await fetch("/api/bookings/reserve-itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payment_method: form.payment_method, legs: legsForCheckout })
+      body: JSON.stringify({
+        payment_method: form.payment_method,
+        legs: legsForCheckout,
+        journey_type: isRoundTrip ? "round_trip" : undefined
+      })
     });
     const json = await response.json();
     if (response.status === 409) {
@@ -271,6 +317,15 @@ function SeatsContent() {
             <p className="text-xs font-semibold uppercase tracking-wider text-cerulean-700">Seat selection</p>
             <h1 className="mt-1 text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl">{t.title}</h1>
             <p className="mt-1 text-sm text-zinc-500">{t.subtitle}</p>
+            {activeSelectableClass ? (
+              <p className="mt-2 inline-flex rounded-full bg-cerulean-50 px-3 py-1 text-xs font-medium text-cerulean-800 ring-1 ring-cerulean-100">
+                {isRoundTrip
+                  ? activeLegIndex === 0
+                    ? `${t.outboundLeg} · ${t.classOnlyShort.replace("{class}", t.classNames[activeSelectableClass])}`
+                    : `${t.returnLeg} · ${t.classOnlyShort.replace("{class}", t.classNames[activeSelectableClass])}`
+                  : t.classOnlyShort.replace("{class}", t.classNames[activeSelectableClass])}
+              </p>
+            ) : null}
             {flight && (
               <div className="mt-4 inline-flex flex-wrap items-center gap-2 rounded-xl bg-zinc-50 px-4 py-3 text-sm">
                 <Plane className="size-4 text-cerulean-700" strokeWidth={1.75} />
@@ -320,7 +375,15 @@ function SeatsContent() {
                     : "border border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300"
                 )}
               >
-                {t.leg} {index + 1}: {id}
+                {isRoundTrip
+                  ? index === 0
+                    ? t.outboundLeg
+                    : t.returnLeg
+                  : `${t.leg} ${index + 1}`}
+                : {id}
+                {selectableClassByFlight[id]
+                  ? ` · ${t.classNames[selectableClassByFlight[id] as SeatClass]}`
+                  : ""}
                 {selectedByFlight[id] ? ` · ${selectedByFlight[id].seat_number}` : ""}
               </button>
             ))}
@@ -328,7 +391,11 @@ function SeatsContent() {
         )}
 
         <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-zinc-100 pt-4">
-          {flightIds.length > 1 && <span className="text-xs font-medium text-cerulean-700">{t.connectingNotice}</span>}
+          {flightIds.length > 1 && (
+            <span className="text-xs font-medium text-cerulean-700">
+              {isRoundTrip ? t.roundTripNotice : t.connectingNotice}
+            </span>
+          )}
           <span className="inline-flex items-center gap-2 text-xs text-zinc-600">
             <span className="size-3 rounded border border-zinc-200 bg-white shadow-sm" /> {t.available}
           </span>
@@ -338,6 +405,14 @@ function SeatsContent() {
           <span className="inline-flex items-center gap-2 text-xs text-zinc-600">
             <span className="size-3 rounded border border-zinc-200 bg-zinc-100" /> {t.reservedLabel}
           </span>
+          {activeSelectableClass ? (
+            <span className="inline-flex items-center gap-2 text-xs text-zinc-600">
+              <span className="flex size-3 items-center justify-center rounded border border-zinc-200 bg-zinc-100 text-[8px] font-bold leading-none text-zinc-400">
+                ×
+              </span>{" "}
+              {t.wrongFareLegend}
+            </span>
+          ) : null}
           <span className="text-xs text-zinc-400">
             {seatStats.available} / {seatStats.total} available
           </span>
@@ -353,11 +428,13 @@ function SeatsContent() {
           sections={sections}
           selected={selected}
           onSelect={chooseSeat}
+          selectableClass={activeSelectableClass}
           labels={{
             available: t.available,
             held: t.heldLabel,
             reserved: t.reservedLabel,
             unavailable: t.unavailable,
+            wrongClass: t.wrongClass,
             exit: t.exit,
             galley: t.galley,
             classNames: t.classNames
@@ -377,6 +454,8 @@ function SeatsContent() {
           <CheckoutPanel
             selected={selected}
             flightIds={flightIds}
+            selectedByFlight={selectedByFlight}
+            isRoundTrip={isRoundTrip}
             promotions={promotions}
             selectedPromo={selectedPromo}
             paymentMethod={form.payment_method}

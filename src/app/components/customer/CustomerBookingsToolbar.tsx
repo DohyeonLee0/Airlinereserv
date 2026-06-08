@@ -24,6 +24,7 @@ export default function CustomerBookingsToolbar({
   const hasFilters =
     filters.query.trim() !== "" ||
     filters.status !== "all" ||
+    filters.tripType !== "all" ||
     filters.departureFrom !== "" ||
     filters.departureTo !== "";
 
@@ -44,8 +45,8 @@ export default function CustomerBookingsToolbar({
         ) : null}
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto_auto_auto]">
-        <label className="block">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_auto_auto_auto_auto]">
+        <label className="block sm:col-span-2 lg:col-span-1">
           <span className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-600">
             <Search className="size-3.5" strokeWidth={1.75} />
             Search bookings
@@ -54,9 +55,23 @@ export default function CustomerBookingsToolbar({
             type="search"
             value={filters.query}
             onChange={(e) => onChange({ query: e.target.value })}
-            placeholder="Booking #, route, flight, seat, status…"
+            placeholder="Booking #, route, flight, seat, trip type…"
             className="w-full rounded-xl border border-zinc-200 px-3 py-2.5 text-sm outline-none focus:border-cerulean-500 focus:ring-2 focus:ring-cerulean-500/20"
           />
+        </label>
+
+        <label className="block min-w-[140px]">
+          <span className="mb-1.5 block text-xs font-medium text-zinc-600">Trip type</span>
+          <select
+            value={filters.tripType}
+            onChange={(e) => onChange({ tripType: e.target.value as BookingFilters["tripType"] })}
+            className="w-full rounded-xl border border-zinc-200 px-3 py-2.5 text-sm outline-none focus:border-cerulean-500"
+          >
+            <option value="all">All trip types</option>
+            <option value="OneWay">One-way</option>
+            <option value="RoundTrip">Round-trip</option>
+            <option value="Connecting">Connecting</option>
+          </select>
         </label>
 
         <label className="block min-w-[140px]">

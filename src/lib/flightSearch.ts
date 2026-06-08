@@ -8,9 +8,29 @@ import {
 
 export type JourneyType = "one_way" | "round_trip";
 
-export function routeKey(row: RouteRow): string {
+export function routeIdentityKey(row: RouteRow): string {
   const ids = flightIdsOf(row);
-  return `${row.route_type ?? "DIRECT"}-${ids.join("-")}-${row.class_name ?? "any"}`;
+  return `${row.route_type ?? "DIRECT"}-${ids.join("-")}`;
+}
+
+export function routeKey(row: RouteRow): string {
+  const cls = row.class_name?.trim();
+  return `${routeIdentityKey(row)}-${cls || "any"}`;
+}
+
+/** One row per flight/route — keep the lowest fare when class filter is off. */
+export function collapseRoutesByFlight(routes: RouteRow[]): RouteRow[] {
+  const map = new Map<string, RouteRow>();
+
+  for (const row of routes) {
+    const key = routeIdentityKey(row);
+    const existing = map.get(key);
+    if (!existing || priceOf(row) < priceOf(existing)) {
+      map.set(key, { ...row, class_name: undefined });
+    }
+  }
+
+  return Array.from(map.values());
 }
 
 /** Mirrors recommend_routes SP scoring formula. */
@@ -67,6 +87,44 @@ export function sortSearchResults(routes: RouteRow[]): { sorted: RouteRow[]; bes
 export function hasActivePromotion(row: RouteRow): boolean {
   const code = row.applied_promo_code?.trim();
   return Boolean(code && code !== "NO_PROMO");
+}
+
+export type RoundTripEstimate = {
+  fromTotal: number;
+  classLabel: string;
+};
+
+function minPriceByClass(routes: RouteRow[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const row of routes) {
+    const cls = row.class_name?.trim() || "Economy";
+    const price = priceOf(row);
+    const prev = map.get(cls);
+    if (prev === undefined || price < prev) map.set(cls, price);
+  }
+  return map;
+}
+
+/** Lowest outbound + return total for the same cabin class. */
+export function estimateRoundTripFrom(
+  outbound: RouteRow[],
+  returnRoutes: RouteRow[]
+): RoundTripEstimate | null {
+  if (!outbound.length || !returnRoutes.length) return null;
+
+  const outboundByClass = minPriceByClass(outbound);
+  const returnByClass = minPriceByClass(returnRoutes);
+
+  let best: RoundTripEstimate | null = null;
+  for (const [cls, outPrice] of outboundByClass) {
+    const retPrice = returnByClass.get(cls);
+    if (retPrice === undefined) continue;
+    const total = outPrice + retPrice;
+    if (!best || total < best.fromTotal) {
+      best = { fromTotal: total, classLabel: cls };
+    }
+  }
+  return best;
 }
 
 export function promoRowsToRoutes(rows: Record<string, unknown>[]): RouteRow[] {

@@ -17,11 +17,14 @@ import FlightSearchWidget from "@/app/components/home/FlightSearchWidget";
 import PopularRouteCard from "@/app/components/home/PopularRouteCard";
 import Button from "@/app/components/ui/Button";
 import { cn } from "@/lib/cn";
-import { routeKey, type JourneyType } from "@/lib/flightSearch";
+import { estimateRoundTripFrom, routeKey, type JourneyType } from "@/lib/flightSearch";
 import {
   flightIdsOf,
   flightNumbersOf,
+  isApproximateFare,
   stopLabel,
+  priceLabelOf,
+  roundTripSeatsHref,
   type RouteRow
 } from "@/lib/routeSearch";
 
@@ -34,6 +37,7 @@ type SearchResults = {
   bestReturnKey: string | null;
   noPromotionalDeals: boolean;
   journeyType: JourneyType;
+  searchedClassName: SeatClass;
 };
 
 type ExploreDeal = {
@@ -115,6 +119,8 @@ export default function HomePage() {
     apply_promotions: false
   });
   const [searchResults, setSearchResults] = useState<SearchResults | null>(null);
+  const [selectedOutbound, setSelectedOutbound] = useState<RouteRow | null>(null);
+  const [selectedReturn, setSelectedReturn] = useState<RouteRow | null>(null);
   const [recommended, setRecommended] = useState<RouteRow[]>([]);
   const [exploreDeals, setExploreDeals] = useState<ExploreDeal[]>(
     POPULAR_FROM_ICN.map((d) => ({ ...d, topRoute: null, loading: true }))
@@ -182,6 +188,8 @@ export default function HomePage() {
     setLoading(true);
     setError("");
     setHasSearched(true);
+    setSelectedOutbound(null);
+    setSelectedReturn(null);
 
     const params = new URLSearchParams({
       dep_airport: activeForm.dep_airport,
@@ -212,7 +220,8 @@ export default function HomePage() {
         bestOutboundKey: data.bestOutboundKey ?? data.bestRouteKey ?? null,
         bestReturnKey: data.bestReturnKey ?? null,
         noPromotionalDeals: Boolean(data.noPromotionalDeals),
-        journeyType: data.journeyType ?? activeForm.journey_type
+        journeyType: data.journeyType ?? activeForm.journey_type,
+        searchedClassName: activeForm.class_name
       });
 
       if (scrollToResults) {
@@ -243,16 +252,41 @@ export default function HomePage() {
   function renderResultCards(
     routes: RouteRow[],
     bestKey: string | null,
-    keyPrefix: string
+    keyPrefix: string,
+    leg?: "outbound" | "return",
+    roundTrip?: { origin: string; destination: string; outboundDate: string; returnDate: string },
+    selectionMode = false,
+    selected: RouteRow | null = null,
+    onSelect?: (row: RouteRow) => void,
+    pairedLeg?: RouteRow | null,
+    seatClassFilter: SeatClass = "",
+    journeyType: JourneyType = "one_way"
   ) {
     return routes.map((row, index) => (
       <FlightResultCard
         key={`${keyPrefix}-${routeKey(row)}-${index}`}
         row={row}
         isBest={bestKey !== null && routeKey(row) === bestKey}
+        leg={leg}
+        roundTrip={roundTrip}
+        selectionMode={selectionMode}
+        isSelected={selected !== null && routeKey(selected) === routeKey(row)}
+        onSelect={onSelect ? () => onSelect(row) : undefined}
+        pairedLeg={pairedLeg}
+        seatClassFilter={seatClassFilter}
+        journeyType={journeyType}
       />
     ));
   }
+
+  const roundTripSelectionTotal =
+    selectedOutbound && selectedReturn ? priceOf(selectedOutbound) + priceOf(selectedReturn) : null;
+  const roundTripReady = Boolean(selectedOutbound && selectedReturn && searchResults?.return.length);
+
+  const roundTripEstimate =
+    searchResults?.journeyType === "round_trip"
+      ? estimateRoundTripFrom(searchResults.outbound, searchResults.return)
+      : null;
 
   return (
     <div className="bg-white">
@@ -326,6 +360,9 @@ export default function HomePage() {
                     flightDate={form.flight_date}
                     seatClass={form.class_name}
                     price={deal.topRoute ? priceOf(deal.topRoute) : undefined}
+                    priceApproximate={
+                      deal.topRoute ? isApproximateFare(deal.topRoute, form.journey_type) : false
+                    }
                     score={deal.topRoute?.recommendation_score}
                     badge={
                       deal.topRoute?.discount_percent
@@ -388,10 +425,12 @@ export default function HomePage() {
                       </div>
                       <div className="flex items-center gap-4">
                         <div className="text-right">
-                          <p className="text-xl font-bold tabular-nums text-zinc-900">${priceOf(row).toLocaleString("en-US")}</p>
+                          <p className="text-xl font-bold tabular-nums text-zinc-900">
+                            ${priceLabelOf(row, form.journey_type)}
+                          </p>
                           <p className="text-xs text-zinc-500">{row.recommendation_score ?? "—"} score</p>
                         </div>
-                        <Link href={seatHref(row)}>
+                        <Link href={seatHref(row, form.class_name || undefined)}>
                           <Button size="sm">Select</Button>
                         </Link>
                       </div>
@@ -450,18 +489,30 @@ export default function HomePage() {
       )}
 
       {hasSearched && (
-        <section ref={resultsRef} className="scroll-mt-24 border-t border-zinc-100 bg-zinc-50/50 px-5 py-16 sm:px-8">
+        <section ref={resultsRef} className={cn(
+          "scroll-mt-24 border-t border-zinc-100 bg-zinc-50/50 px-5 py-16 sm:px-8",
+          searchResults?.journeyType === "round_trip" && "pb-36"
+        )}>
           <div className="mx-auto max-w-[1120px]">
             <div className="mb-8 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-wider text-cerulean-700">Results</p>
                 <h2 className="mt-2 text-3xl font-bold tracking-tight text-zinc-900">
-                  {form.dep_airport} → {form.arr_airport}
-                  {searchResults?.journeyType === "round_trip" ? ` · Round-trip` : ""}
+                  {searchResults?.journeyType === "round_trip" ? (
+                    <>
+                      {form.dep_airport} ↔ {form.arr_airport}
+                      <span className="text-zinc-500"> · Round-trip</span>
+                    </>
+                  ) : (
+                    <>
+                      {form.dep_airport} → {form.arr_airport}
+                    </>
+                  )}
                 </h2>
                 <p className="mt-1 text-zinc-500">
-                  {form.flight_date}
-                  {searchResults?.journeyType === "round_trip" ? ` → ${form.return_date}` : ""}
+                  {searchResults?.journeyType === "round_trip"
+                    ? `${form.flight_date} – ${form.return_date}`
+                    : form.flight_date}
                   {form.class_name ? ` · ${form.class_name}` : " · All classes"}
                   {form.max_price ? ` · Max $${form.max_price}` : ""}
                   {form.apply_promotions ? " · Promotions only" : ""}
@@ -482,6 +533,32 @@ export default function HomePage() {
               </div>
             )}
 
+            {!error && !loading && searchResults?.journeyType === "round_trip" && (
+              <div className="mb-6 rounded-2xl border border-cerulean-200/80 bg-cerulean-50/50 px-5 py-4">
+                {roundTripEstimate ? (
+                  <>
+                    <p className="text-sm font-semibold text-zinc-900">
+                      Round-trip total from ${roundTripEstimate.fromTotal.toLocaleString("en-US")}
+                      <span className="font-normal text-zinc-600">
+                        {" "}
+                        · {roundTripEstimate.classLabel} · outbound + return per leg
+                      </span>
+                    </p>
+                    <p className="mt-1 text-sm text-zinc-600">
+                      Select one outbound and one return flight, then continue to choose seats for both legs.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-sm text-zinc-600">
+                    Select one outbound and one return flight. Each card shows the fare for that leg only.
+                    {searchResults.return.length === 0
+                      ? " No return flights were found for your return date."
+                      : ""}
+                  </p>
+                )}
+              </div>
+            )}
+
             {!error && !loading && searchResults && searchResults.outbound.length === 0 && searchResults.return.length === 0 && !searchResults.noPromotionalDeals && (
               <div className="rounded-2xl border border-zinc-100 bg-white p-8 text-center text-zinc-500">
                 No flights found. Try another date or destination.
@@ -490,37 +567,132 @@ export default function HomePage() {
 
             {searchResults && searchResults.outbound.length > 0 && (
               <div className="mb-10">
-                <h3 className="mb-4 text-lg font-semibold text-zinc-900">
+                <h3 className="mb-1 text-lg font-semibold text-zinc-900">
                   {searchResults.journeyType === "round_trip" ? "Outbound flights" : "Flights"}
                   <span className="ml-2 text-sm font-normal text-zinc-500">
                     ({searchResults.outbound.length} result{searchResults.outbound.length === 1 ? "" : "s"})
                   </span>
                 </h3>
+                {searchResults.journeyType === "round_trip" ? (
+                  <p className="mb-4 text-sm text-zinc-500">
+                    {form.dep_airport} → {form.arr_airport} · {form.flight_date}
+                  </p>
+                ) : null}
                 <div className="grid gap-4 lg:grid-cols-2">
                   {renderResultCards(
                     searchResults.outbound,
                     searchResults.bestOutboundKey,
-                    "outbound"
+                    "outbound",
+                    searchResults.journeyType === "round_trip" ? "outbound" : undefined,
+                    searchResults.journeyType === "round_trip"
+                      ? {
+                          origin: form.dep_airport,
+                          destination: form.arr_airport,
+                          outboundDate: form.flight_date,
+                          returnDate: form.return_date
+                        }
+                      : undefined,
+                    searchResults.journeyType === "round_trip",
+                    selectedOutbound,
+                    setSelectedOutbound,
+                    selectedReturn,
+                    searchResults.searchedClassName,
+                    searchResults.journeyType
                   )}
                 </div>
               </div>
             )}
 
-            {searchResults && searchResults.journeyType === "round_trip" && searchResults.return.length > 0 && (
+            {searchResults && searchResults.journeyType === "round_trip" && (
               <div>
-                <h3 className="mb-4 text-lg font-semibold text-zinc-900">
+                <h3 className="mb-1 text-lg font-semibold text-zinc-900">
                   Return flights
                   <span className="ml-2 text-sm font-normal text-zinc-500">
                     ({searchResults.return.length} result{searchResults.return.length === 1 ? "" : "s"})
                   </span>
                 </h3>
-                <div className="grid gap-4 lg:grid-cols-2">
-                  {renderResultCards(searchResults.return, searchResults.bestReturnKey, "return")}
-                </div>
+                <p className="mb-4 text-sm text-zinc-500">
+                  {form.arr_airport} → {form.dep_airport} · {form.return_date}
+                </p>
+                {searchResults.return.length > 0 ? (
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    {renderResultCards(
+                      searchResults.return,
+                      searchResults.bestReturnKey,
+                      "return",
+                      "return",
+                      {
+                        origin: form.dep_airport,
+                        destination: form.arr_airport,
+                        outboundDate: form.flight_date,
+                        returnDate: form.return_date
+                      },
+                      true,
+                      selectedReturn,
+                      setSelectedReturn,
+                      selectedOutbound,
+                      searchResults.searchedClassName,
+                      searchResults.journeyType
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-zinc-100 bg-white p-6 text-sm text-zinc-500">
+                    No return flights on this date. Try another return date.
+                  </div>
+                )}
               </div>
             )}
           </div>
         </section>
+      )}
+
+      {hasSearched && searchResults?.journeyType === "round_trip" && (
+        <div className="sticky bottom-0 z-40 border-t border-zinc-200 bg-white/95 px-5 py-4 shadow-[0_-8px_30px_rgba(0,0,0,0.08)] backdrop-blur sm:px-8">
+          <div className="mx-auto flex max-w-[1120px] flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-zinc-600">
+              <p className="font-semibold text-zinc-900">Round-trip selection</p>
+              <p className="mt-1">
+                Outbound:{" "}
+                {selectedOutbound ? (
+                  <span className="font-medium text-zinc-800">
+                    {flightNumbersOf(selectedOutbound).join(" · ")} · ${priceOf(selectedOutbound).toLocaleString("en-US")}
+                  </span>
+                ) : (
+                  <span className="text-zinc-400">Not selected</span>
+                )}
+                {" · "}
+                Return:{" "}
+                {selectedReturn ? (
+                  <span className="font-medium text-zinc-800">
+                    {flightNumbersOf(selectedReturn).join(" · ")} · ${priceOf(selectedReturn).toLocaleString("en-US")}
+                  </span>
+                ) : (
+                  <span className="text-zinc-400">Not selected</span>
+                )}
+              </p>
+              {roundTripSelectionTotal !== null ? (
+                <p className="mt-1 font-semibold text-zinc-900">
+                  Total from ${roundTripSelectionTotal.toLocaleString("en-US")}
+                </p>
+              ) : null}
+            </div>
+            {roundTripReady && selectedOutbound && selectedReturn ? (
+              <Link
+                href={roundTripSeatsHref(
+                  selectedOutbound,
+                  selectedReturn,
+                  searchResults?.searchedClassName || undefined
+                )}
+              >
+                <Button size="lg">Choose seats · round-trip</Button>
+              </Link>
+            ) : (
+              <Button size="lg" disabled>
+                Choose seats · round-trip
+              </Button>
+            )}
+          </div>
+        </div>
       )}
 
       {!hasSearched && authReady && !sessionUser && (

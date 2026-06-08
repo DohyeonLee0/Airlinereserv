@@ -16,18 +16,23 @@ type SeatMapProps = {
   sections: { className: SeatClass; seats: Seat[] }[];
   selected: Seat | null;
   onSelect: (seat: Seat) => void;
+  selectableClass?: SeatClass | null;
   labels: {
     available: string;
     held: string;
     reserved: string;
     unavailable: string;
+    wrongClass: string;
     exit: string;
     galley: string;
     classNames: Record<SeatClass, string>;
   };
 };
 
-function seatButtonClass(seat: Seat, selected: boolean) {
+function seatButtonClass(seat: Seat, selected: boolean, lockedOut: boolean) {
+  if (lockedOut) {
+    return "cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-400";
+  }
   if (seat.seat_status === "reserved") {
     return "cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-300";
   }
@@ -40,7 +45,14 @@ function seatButtonClass(seat: Seat, selected: boolean) {
   return "border-zinc-200 bg-white text-zinc-700 shadow-sm hover:border-cerulean-500 hover:bg-cerulean-500/5 hover:text-deep-space-blue";
 }
 
-export default function SeatMap({ flight, sections, selected, onSelect, labels }: SeatMapProps) {
+export default function SeatMap({
+  flight,
+  sections,
+  selected,
+  onSelect,
+  labels,
+  selectableClass = null
+}: SeatMapProps) {
   return (
     <div className="overflow-auto rounded-2xl border border-zinc-100 bg-white p-4 shadow-sm sm:p-6">
       <div className="mx-auto min-w-[620px] max-w-4xl">
@@ -80,21 +92,31 @@ export default function SeatMap({ flight, sections, selected, onSelect, labels }
                               }
                               const seat = byLetter.get(letter);
                               if (!seat) return <div key={`${row}-${letter}`} className="h-9" />;
-                              const disabled = seat.seat_status !== "available";
+                              const lockedOut =
+                                selectableClass != null && seat.class_name !== selectableClass;
+                              const disabled = lockedOut || seat.seat_status !== "available";
                               const isSelected = selected?.seat_number === seat.seat_number;
                               return (
                                 <button
                                   type="button"
                                   key={seat.seat_number}
                                   disabled={disabled}
-                                  title={disabled ? labels.unavailable : `${seat.seat_number} · $${seat.price}`}
-                                  onClick={() => onSelect(seat)}
+                                  title={
+                                    lockedOut
+                                      ? labels.wrongClass
+                                      : disabled
+                                        ? labels.unavailable
+                                        : `${seat.seat_number} · $${seat.price}`
+                                  }
+                                  onClick={() => {
+                                    if (!lockedOut) onSelect(seat);
+                                  }}
                                   className={cn(
                                     "flex h-9 min-w-9 items-center justify-center rounded-lg border text-[10px] font-bold transition-all duration-150 sm:text-xs",
-                                    seatButtonClass(seat, isSelected)
+                                    seatButtonClass(seat, isSelected, lockedOut)
                                   )}
                                 >
-                                  {letter}
+                                  {lockedOut ? "×" : letter}
                                 </button>
                               );
                             })}

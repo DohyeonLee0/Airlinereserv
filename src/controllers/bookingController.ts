@@ -54,6 +54,63 @@ async function allocateRefundId(connection: PoolConnection) {
   return rows[0].refund_id;
 }
 
+type RouteRow = RowDataPacket & {
+  dep_airport: string;
+  arr_airport: string;
+};
+
+async function getFlightRoute(connection: PoolConnection, flightId: number) {
+  const [rows] = await connection.query<RouteRow[]>(
+    `SELECT fs.dep_airport, fs.arr_airport
+     FROM flights f
+     JOIN flight_schedules fs ON f.schedule_id = fs.schedule_id
+     WHERE f.flight_id = ?`,
+    [flightId]
+  );
+  const row = rows[0];
+  if (!row) {
+    throw new Error("Flight route not found");
+  }
+  return { dep: row.dep_airport, arr: row.arr_airport };
+}
+
+async function resolveRoundTripItineraryId(
+  connection: PoolConnection,
+  outboundFlightId: number,
+  returnFlightId: number
+) {
+  const outbound = await getFlightRoute(connection, outboundFlightId);
+  const inbound = await getFlightRoute(connection, returnFlightId);
+  if (outbound.dep !== inbound.arr || outbound.arr !== inbound.dep) {
+    throw new Error("Return flight must route back to the outbound origin");
+  }
+
+  const [existing] = await connection.query<RowDataPacket[]>(
+    `SELECT itinerary_id
+     FROM itineraries
+     WHERE trip_type = 'RoundTrip'
+       AND departure_airport_code = ?
+       AND arrival_airport_code = ?
+     ORDER BY itinerary_id
+     LIMIT 1`,
+    [outbound.dep, outbound.arr]
+  );
+  if (existing[0]?.itinerary_id != null) {
+    return Number(existing[0].itinerary_id);
+  }
+
+  const [maxRows] = await connection.query<RowDataPacket[]>(
+    "SELECT COALESCE(MAX(itinerary_id), 0) + 1 AS next_id FROM itineraries"
+  );
+  const nextId = Number(maxRows[0]?.next_id ?? 1);
+  await connection.query(
+    `INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
+     VALUES (?, 'RoundTrip', ?, ?)`,
+    [nextId, outbound.dep, outbound.arr]
+  );
+  return nextId;
+}
+
 async function resolvePromoPrice(
   connection: PoolConnection,
   flightId: number,
@@ -200,7 +257,10 @@ export async function createItineraryBooking(request: NextRequest) {
 
       if (itineraryId == null) {
         itineraryId = flight.itinerary_id;
-      } else if (itineraryId !== flight.itinerary_id) {
+      } else if (
+        body.journey_type !== "round_trip" &&
+        itineraryId !== flight.itinerary_id
+      ) {
         throw new Error("All legs must belong to the same itinerary");
       }
 
@@ -229,6 +289,14 @@ export async function createItineraryBooking(request: NextRequest) {
       const legPrice = await resolvePromoPrice(connection, flightId, seat.class_id, Number(seat.price), promoCode);
       totalAmount += legPrice;
       legDetails.push({ flight_id: flightId, seat_number: seatNumber, ticket_id: 0, price: legPrice });
+    }
+
+    if (body.journey_type === "round_trip" && legDetails.length >= 2) {
+      itineraryId = await resolveRoundTripItineraryId(
+        connection,
+        legDetails[0].flight_id,
+        legDetails[1].flight_id
+      );
     }
 
     const ids = await allocateReservationIds(connection);
@@ -271,6 +339,7 @@ export async function createItineraryBooking(request: NextRequest) {
     return created({
       booking_id: ids.booking_id,
       payment_id: ids.payment_id,
+      journey_type: body.journey_type === "round_trip" ? "round_trip" : "connecting",
       tickets: legDetails.map((leg) => ({
         ticket_id: leg.ticket_id,
         flight_id: leg.flight_id,

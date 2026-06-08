@@ -5,6 +5,7 @@ import { formatDate, formatDateTime } from "@/lib/formatDate";
 export type BookingFilters = {
   query: string;
   status: "all" | "Active" | "Cancelled";
+  tripType: "all" | "OneWay" | "RoundTrip" | "Connecting";
   departureFrom: string;
   departureTo: string;
 };
@@ -12,6 +13,7 @@ export type BookingFilters = {
 export const DEFAULT_BOOKING_FILTERS: BookingFilters = {
   query: "",
   status: "all",
+  tripType: "all",
   departureFrom: "",
   departureTo: ""
 };
@@ -57,6 +59,7 @@ export function filterBookingGroups(groups: BookingGroup[], filters: BookingFilt
 
   return groups.filter((group) => {
     if (filters.status !== "all" && group.status !== filters.status) return false;
+    if (filters.tripType !== "all" && group.trip_type !== filters.tripType) return false;
 
     const earliest = earliestDepartureKey(group);
     if (filters.departureFrom && (!earliest || earliest < filters.departureFrom)) return false;
@@ -70,8 +73,16 @@ export function filterBookingGroups(groups: BookingGroup[], filters: BookingFilt
 
 export function sortBookingsNewestFirst(groups: BookingGroup[]): BookingGroup[] {
   return [...groups].sort((a, b) => {
-    const ta = new Date(a.booking_time).getTime();
-    const tb = new Date(b.booking_time).getTime();
-    return tb - ta;
+    if (b.booking_id !== a.booking_id) {
+      return b.booking_id - a.booking_id;
+    }
+
+    const tb = Date.parse(String(b.booking_time));
+    const ta = Date.parse(String(a.booking_time));
+    if (!Number.isNaN(tb) && !Number.isNaN(ta) && tb !== ta) {
+      return tb - ta;
+    }
+
+    return 0;
   });
 }

@@ -3,6 +3,7 @@ import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
 import {
   attachRecommendationScores,
+  collapseRoutesByFlight,
   hasActivePromotion,
   promoRowsToRoutes,
   sortSearchResults,
@@ -186,6 +187,10 @@ async function searchLeg(
     routes = [...directRoutes, ...connectingRoutes];
   }
 
+  if (journeyType === "one_way" && classId == null) {
+    routes = collapseRoutesByFlight(routes);
+  }
+
   return scoreAndSortRoutes(routes, depAirport, arrAirport, flightDate, classId);
 }
 
@@ -221,26 +226,21 @@ export async function searchUnifiedFlights(request: NextRequest) {
     );
 
     if (journeyType === "round_trip" && returnDate) {
-      const inbound = await searchLeg(
-        arrAirport,
-        depAirport,
-        returnDate,
-        classId,
-        maxPrice,
-        journeyType,
-        applyPromotions
-      );
+      const [outboundResult, inboundResult] = await Promise.all([
+        searchLeg(depAirport, arrAirport, flightDate, classId, maxPrice, journeyType, applyPromotions),
+        searchLeg(arrAirport, depAirport, returnDate, classId, maxPrice, journeyType, applyPromotions)
+      ]);
 
       const noPromotionalDeals =
-        applyPromotions && outbound.routes.length === 0 && inbound.routes.length === 0;
+        applyPromotions && outboundResult.routes.length === 0 && inboundResult.routes.length === 0;
 
       return ok({
         journeyType,
         applyPromotions,
-        outbound: outbound.routes,
-        return: inbound.routes,
-        bestOutboundKey: outbound.bestKey,
-        bestReturnKey: inbound.bestKey,
+        outbound: outboundResult.routes,
+        return: inboundResult.routes,
+        bestOutboundKey: outboundResult.bestKey,
+        bestReturnKey: inboundResult.bestKey,
         noPromotionalDeals
       });
     }

@@ -1,25 +1,29 @@
 import mysql, { Pool, RowDataPacket } from "mysql2/promise";
 
-let pool: Pool | undefined;
+declare global {
+  var __arsMysqlPool: Pool | undefined;
+}
 
 export function getPool() {
-  if (!pool) {
-    pool = mysql.createPool({
+  if (!global.__arsMysqlPool) {
+    global.__arsMysqlPool = mysql.createPool({
       host: process.env.DB_HOST ?? "127.0.0.1",
       port: Number(process.env.DB_PORT ?? 3306),
       user: process.env.DB_USER ?? "root",
       password: process.env.DB_PASSWORD ?? "",
       database: process.env.DB_NAME ?? "airline_reservation",
       waitForConnections: true,
-      connectionLimit: 10,
+      connectionLimit: Number(process.env.DB_POOL_SIZE ?? 5),
       queueLimit: 0,
       multipleStatements: true,
       dateStrings: true,
-      decimalNumbers: true
+      decimalNumbers: true,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0
     });
   }
 
-  return pool;
+  return global.__arsMysqlPool;
 }
 
 export async function callProcedure<T extends RowDataPacket[]>(

@@ -37,6 +37,24 @@ export type BookingGroup = {
   legs: BookingRow[];
 };
 
+function inferTripType(group: BookingGroup): string {
+  if (group.legs.length < 2 || group.trip_type === "RoundTrip") {
+    return group.trip_type;
+  }
+
+  const sorted = [...group.legs].sort((a, b) => a.flight_date.localeCompare(b.flight_date));
+  const outbound = sorted[0];
+  const inbound = sorted[sorted.length - 1];
+  if (
+    outbound.dep_airport === inbound.arr_airport &&
+    outbound.arr_airport === inbound.dep_airport
+  ) {
+    return "RoundTrip";
+  }
+
+  return group.trip_type;
+}
+
 export function groupBookingRows(rows: BookingRow[]): BookingGroup[] {
   const map = new Map<number, BookingGroup>();
   for (const row of rows) {
@@ -59,5 +77,18 @@ export function groupBookingRows(rows: BookingRow[]): BookingGroup[] {
       });
     }
   }
-  return Array.from(map.values());
+
+  return Array.from(map.values()).map((group) => {
+    const tripType = inferTripType(group);
+    if (tripType === "RoundTrip" && group.trip_type !== "RoundTrip") {
+      const sorted = [...group.legs].sort((a, b) => a.flight_date.localeCompare(b.flight_date));
+      return {
+        ...group,
+        trip_type: tripType,
+        departure_airport_code: sorted[0].dep_airport,
+        arrival_airport_code: sorted[0].arr_airport
+      };
+    }
+    return { ...group, trip_type: tripType };
+  });
 }
