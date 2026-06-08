@@ -225,24 +225,24 @@ VALUES
 
 -- 2026-06-01 is Monday. These demo schedules operate Mon/Wed/Fri.
 INSERT INTO schedule_days (schedule_id, day_of_week)
-SELECT schedule_id, day_of_week
-FROM flight_schedules
-WHERE schedule_id <= 12
+SELECT fs.schedule_id, days.day_of_week
+FROM flight_schedules fs
 CROSS JOIN (
     SELECT 'MON' AS day_of_week UNION ALL
     SELECT 'WED' UNION ALL
     SELECT 'FRI'
-) days;
+) days
+WHERE fs.schedule_id <= 12;
 
 INSERT INTO schedule_days (schedule_id, day_of_week)
-SELECT schedule_id, day_of_week
-FROM flight_schedules
-WHERE schedule_id BETWEEN 13 AND 18
+SELECT fs.schedule_id, days.day_of_week
+FROM flight_schedules fs
 CROSS JOIN (
     SELECT 'TUE' AS day_of_week UNION ALL
     SELECT 'THU' UNION ALL
     SELECT 'SAT'
-) days;
+) days
+WHERE fs.schedule_id BETWEEN 13 AND 18;
 
 -- ============================================================
 -- ITINERARIES

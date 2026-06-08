@@ -19,6 +19,7 @@ DROP TABLE IF EXISTS flight_schedules;
 DROP TABLE IF EXISTS itineraries;
 DROP TABLE IF EXISTS aircraft_seats;
 DROP TABLE IF EXISTS seat_classes;
+DROP TABLE IF EXISTS aircraft_seat_templates;
 DROP TABLE IF EXISTS aircraft;
 DROP TABLE IF EXISTS airports;
 DROP TABLE IF EXISTS staff_registration_requests;
@@ -94,6 +95,16 @@ CREATE TABLE aircraft (
 CREATE TABLE seat_classes (
     class_id    INT PRIMARY KEY,
     class_name  VARCHAR(30) NOT NULL UNIQUE
+);
+
+CREATE TABLE aircraft_seat_templates (
+    template_id    INT PRIMARY KEY,
+    template_name  VARCHAR(100) NOT NULL UNIQUE,
+    model_label    VARCHAR(100) NULL,
+    description    VARCHAR(255) NULL,
+    seats_json     JSON NOT NULL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE aircraft_seats (

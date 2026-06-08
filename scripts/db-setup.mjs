@@ -181,6 +181,8 @@ try {
   }
 
   const connection = await mysql.createConnection(connectionConfig);
+  const { seedSeatTemplates } = await import("./seed-seat-templates.mjs");
+  await seedSeatTemplates(connection);
   await connection.query("SET FOREIGN_KEY_CHECKS=0");
   await connection.query("DELETE FROM flight_seats");
   await connection.query("SET FOREIGN_KEY_CHECKS=1");

@@ -41,27 +41,72 @@
 
 
 -- ============================================================
--- 0. SCHEMA MIGRATIONS (safe to re-run)
+-- 0. SCHEMA MIGRATIONS (safe to re-run, MySQL 8 / MariaDB)
 -- ============================================================
 
-ALTER TABLE itineraries
-  ADD COLUMN IF NOT EXISTS leg_schedule_ids JSON NULL;
+SET @col_exists = (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'itineraries'
+      AND COLUMN_NAME = 'leg_schedule_ids'
+);
+SET @sql = IF(
+    @col_exists = 0,
+    'ALTER TABLE itineraries ADD COLUMN leg_schedule_ids JSON NULL',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- Allow multiple calendar dates per connecting itinerary leg.
-ALTER TABLE flights DROP INDEX IF EXISTS itinerary_id;
-ALTER TABLE flights
-  ADD UNIQUE INDEX IF NOT EXISTS uq_itinerary_flight_segment (itinerary_id, flight_date, segment_order);
+SET @idx_exists = (
+    SELECT COUNT(*)
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'flights'
+      AND INDEX_NAME = 'itinerary_id'
+);
+SET @sql = IF(
+    @idx_exists > 0,
+    'ALTER TABLE flights DROP INDEX itinerary_id',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @uq_exists = (
+    SELECT COUNT(*)
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'flights'
+      AND INDEX_NAME = 'uq_itinerary_flight_segment'
+);
+SET @sql = IF(
+    @uq_exists = 0,
+    'ALTER TABLE flights ADD UNIQUE INDEX uq_itinerary_flight_segment (itinerary_id, flight_date, segment_order)',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 UPDATE itineraries i
 JOIN (
     SELECT
-        f.itinerary_id,
-        JSON_ARRAYAGG(f.schedule_id ORDER BY f.segment_order) AS leg_ids
+        ordered.itinerary_id,
+        JSON_ARRAYAGG(ordered.schedule_id) AS leg_ids
     FROM (
-        SELECT DISTINCT itinerary_id, segment_order, schedule_id
-        FROM flights
-    ) f
-    GROUP BY f.itinerary_id
+        SELECT itinerary_id, segment_order, schedule_id
+        FROM (
+            SELECT DISTINCT itinerary_id, segment_order, schedule_id
+            FROM flights
+        ) distinct_legs
+        ORDER BY itinerary_id, segment_order
+    ) ordered
+    GROUP BY ordered.itinerary_id
 ) src ON src.itinerary_id = i.itinerary_id
 SET i.leg_schedule_ids = src.leg_ids
 WHERE i.trip_type = 'Connecting'
@@ -116,6 +161,9 @@ DROP PROCEDURE IF EXISTS delete_airline;
 DROP PROCEDURE IF EXISTS upsert_airport;
 DROP PROCEDURE IF EXISTS delete_airport;
 DROP PROCEDURE IF EXISTS upsert_aircraft;
+DROP PROCEDURE IF EXISTS replace_aircraft_seats;
+DROP PROCEDURE IF EXISTS upsert_aircraft_seat_template;
+DROP PROCEDURE IF EXISTS delete_aircraft_seat_template;
 DROP PROCEDURE IF EXISTS upsert_flight_schedule;
 DROP PROCEDURE IF EXISTS upsert_connecting_route;
 DROP PROCEDURE IF EXISTS upsert_promotion;
@@ -855,6 +903,24 @@ BEGIN
       AND  f1.status        = 'Scheduled'
       AND  f2.status        = 'Scheduled'
       AND  f1.itinerary_id <> f2.itinerary_id
+      AND  NOT EXISTS (
+          SELECT 1
+          FROM flights fx
+          WHERE fx.itinerary_id = f1.itinerary_id
+            AND fx.flight_date = f1.flight_date
+            AND fx.status = 'Scheduled'
+          GROUP BY fx.itinerary_id, fx.flight_date
+          HAVING COUNT(*) >= 2
+      )
+      AND  NOT EXISTS (
+          SELECT 1
+          FROM flights fx
+          WHERE fx.itinerary_id = f2.itinerary_id
+            AND fx.flight_date = f2.flight_date
+            AND fx.status = 'Scheduled'
+          GROUP BY fx.itinerary_id, fx.flight_date
+          HAVING COUNT(*) >= 2
+      )
       AND  fls1.is_available = 1
       AND  fls2.is_available = 1
       AND  (p_class_id IS NULL OR fls1.class_id = p_class_id)
@@ -2589,6 +2655,145 @@ BEGIN
         capacity = VALUES(capacity);
 END //
 
+CREATE PROCEDURE replace_aircraft_seats (
+    IN p_aircraft_id INT,
+    IN p_seats_json   JSON
+)
+BEGIN
+    DECLARE v_seat_count INT DEFAULT 0;
+    DECLARE v_idx INT DEFAULT 0;
+    DECLARE v_path VARCHAR(32);
+    DECLARE v_seat_number VARCHAR(5);
+    DECLARE v_class_id INT;
+
+    IF p_aircraft_id IS NULL OR p_aircraft_id <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Invalid aircraft ID.';
+    END IF;
+
+    SET v_seat_count = JSON_LENGTH(p_seats_json);
+    IF v_seat_count IS NULL OR v_seat_count = 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'At least one seat is required.';
+    END IF;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_aircraft_seats;
+    CREATE TEMPORARY TABLE tmp_aircraft_seats (
+        seat_number VARCHAR(5) NOT NULL PRIMARY KEY,
+        class_id    INT NOT NULL
+    );
+
+    WHILE v_idx < v_seat_count DO
+        SET v_path = CONCAT('$[', v_idx, ']');
+        SET v_seat_number = UPPER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(p_seats_json, CONCAT(v_path, '.seat_number')))));
+        SET v_class_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_seats_json, CONCAT(v_path, '.class_id'))) AS UNSIGNED);
+
+        IF v_seat_number IS NULL OR v_seat_number = ''
+           OR v_class_id IS NULL OR v_class_id NOT IN (1, 2, 3) THEN
+            SET @aircraft_seat_err = CONCAT('Seat row ', v_idx + 1, ' is invalid.');
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = @aircraft_seat_err;
+        END IF;
+
+        INSERT INTO tmp_aircraft_seats (seat_number, class_id)
+        VALUES (v_seat_number, v_class_id)
+        ON DUPLICATE KEY UPDATE class_id = VALUES(class_id);
+
+        SET v_idx = v_idx + 1;
+    END WHILE;
+
+    DELETE FROM aircraft_seats WHERE aircraft_id = p_aircraft_id;
+
+    INSERT INTO aircraft_seats (aircraft_id, seat_number, class_id)
+    SELECT p_aircraft_id, seat_number, class_id
+    FROM tmp_aircraft_seats;
+
+    UPDATE aircraft
+    SET capacity = (SELECT COUNT(*) FROM tmp_aircraft_seats)
+    WHERE aircraft_id = p_aircraft_id;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_aircraft_seats;
+END //
+
+CREATE PROCEDURE upsert_aircraft_seat_template (
+    IN p_template_id    INT,
+    IN p_template_name  VARCHAR(100),
+    IN p_model_label    VARCHAR(100),
+    IN p_description    VARCHAR(255),
+    IN p_seats_json     JSON
+)
+BEGIN
+    DECLARE v_seat_count INT DEFAULT 0;
+    DECLARE v_idx INT DEFAULT 0;
+    DECLARE v_path VARCHAR(32);
+    DECLARE v_seat_number VARCHAR(5);
+    DECLARE v_class_id INT;
+
+    IF p_template_name IS NULL OR TRIM(p_template_name) = '' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Template name is required.';
+    END IF;
+
+    SET v_seat_count = JSON_LENGTH(p_seats_json);
+    IF v_seat_count IS NULL OR v_seat_count = 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'At least one seat is required in a template.';
+    END IF;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_aircraft_seat_template_seats;
+    CREATE TEMPORARY TABLE tmp_aircraft_seat_template_seats (
+        seat_number VARCHAR(5) NOT NULL PRIMARY KEY,
+        class_id    INT NOT NULL
+    );
+
+    WHILE v_idx < v_seat_count DO
+        SET v_path = CONCAT('$[', v_idx, ']');
+        SET v_seat_number = UPPER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(p_seats_json, CONCAT(v_path, '.seat_number')))));
+        SET v_class_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_seats_json, CONCAT(v_path, '.class_id'))) AS UNSIGNED);
+
+        IF v_seat_number IS NULL OR v_seat_number = ''
+           OR v_class_id IS NULL OR v_class_id NOT IN (1, 2, 3) THEN
+            SET @template_err = CONCAT('Seat row ', v_idx + 1, ' is invalid.');
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = @template_err;
+        END IF;
+
+        INSERT INTO tmp_aircraft_seat_template_seats (seat_number, class_id)
+        VALUES (v_seat_number, v_class_id)
+        ON DUPLICATE KEY UPDATE class_id = VALUES(class_id);
+
+        SET v_idx = v_idx + 1;
+    END WHILE;
+
+    SET @template_seats_json = (
+        SELECT JSON_ARRAYAGG(JSON_OBJECT('seat_number', ordered.seat_number, 'class_id', ordered.class_id))
+        FROM (
+            SELECT seat_number, class_id
+            FROM tmp_aircraft_seat_template_seats
+            ORDER BY seat_number
+        ) ordered
+    );
+
+    INSERT INTO aircraft_seat_templates (
+        template_id, template_name, model_label, description, seats_json
+    )
+    VALUES (
+        p_template_id, TRIM(p_template_name), NULLIF(TRIM(p_model_label), ''), NULLIF(TRIM(p_description), ''), @template_seats_json
+    )
+    ON DUPLICATE KEY UPDATE
+        template_name = VALUES(template_name),
+        model_label = VALUES(model_label),
+        description = VALUES(description),
+        seats_json = @template_seats_json;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_aircraft_seat_template_seats;
+END //
+
+CREATE PROCEDURE delete_aircraft_seat_template (
+    IN p_template_id INT
+)
+BEGIN
+    DELETE FROM aircraft_seat_templates WHERE template_id = p_template_id;
+END //
+
 CREATE PROCEDURE upsert_flight_schedule (
     IN p_schedule_id   INT,
     IN p_airline_id    VARCHAR(10),
@@ -2725,9 +2930,10 @@ BEGIN
             SET MESSAGE_TEXT = 'Leg 1 must depart from the route origin airport.';
     END IF;
 
+    -- MySQL cannot reference the same TEMPORARY TABLE twice in one query (ER 1137).
     SELECT arr_airport INTO v_last_arr_airport
     FROM tmp_connecting_route_legs
-    WHERE leg_index = (SELECT MAX(leg_index) FROM tmp_connecting_route_legs);
+    WHERE leg_index = v_total_legs;
 
     IF v_last_arr_airport <> p_arrival_airport THEN
         SIGNAL SQLSTATE '45000'
@@ -2778,8 +2984,12 @@ BEGIN
     END WHILE;
 
     SET @leg_schedule_ids = (
-        SELECT JSON_ARRAYAGG(schedule_id ORDER BY leg_index)
-        FROM tmp_connecting_route_legs
+        SELECT JSON_ARRAYAGG(ordered.schedule_id)
+        FROM (
+            SELECT schedule_id
+            FROM tmp_connecting_route_legs
+            ORDER BY leg_index
+        ) ordered
     );
 
     INSERT INTO itineraries (
