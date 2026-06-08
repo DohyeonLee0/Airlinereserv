@@ -8,7 +8,8 @@ type Block =
   | { type: "ul"; items: string[] }
   | { type: "ol"; items: string[] }
   | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "h3"; text: string };
+  | { type: "h3"; text: string }
+  | { type: "label"; text: string };
 
 function inlineFormat(text: string) {
   const parts: ReactNode[] = [];
@@ -47,8 +48,32 @@ function inlineFormat(text: string) {
   return parts.length ? parts : text;
 }
 
+function normalizeMarkdown(markdown: string): string {
+  let text = markdown.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trim();
+  if (!text) return text;
+
+  // Some models return escaped newlines or glue list markers onto one line.
+  text = text.replace(/([.!?:])\s+-\s+/g, "$1\n- ");
+  text = text.replace(/\.\s+-\s+/g, ".\n- ");
+  text = text.replace(/\s+\*\s+(?=\*\*)/g, "\n* ");
+  text = text.replace(/\n{3,}/g, "\n\n");
+
+  return text;
+}
+
+function isBoldLabelLine(line: string) {
+  return /^\*\s+\*\*.+\*\*:?\s*$/.test(line.trim());
+}
+
+function boldLabelText(line: string) {
+  return line
+    .replace(/^\*\s+/, "")
+    .replace(/\*\*(.+?)\*\*:?/, "$1")
+    .trim();
+}
+
 function parseBlocks(markdown: string): Block[] {
-  const lines = markdown.split(/\r?\n/);
+  const lines = normalizeMarkdown(markdown).split("\n");
   const blocks: Block[] = [];
   let i = 0;
 
@@ -83,13 +108,19 @@ function parseBlocks(markdown: string): Block[] {
       continue;
     }
 
+    if (isBoldLabelLine(line)) {
+      blocks.push({ type: "label", text: boldLabelText(line) });
+      i += 1;
+      continue;
+    }
+
     if (/^[-*]\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+      while (i < lines.length && /^[-*]\s+/.test(lines[i]) && !isBoldLabelLine(lines[i])) {
         items.push(lines[i].replace(/^[-*]\s+/, "").trim());
         i += 1;
       }
-      blocks.push({ type: "ul", items });
+      if (items.length) blocks.push({ type: "ul", items });
       continue;
     }
 
@@ -104,7 +135,15 @@ function parseBlocks(markdown: string): Block[] {
     }
 
     const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !lines[i].startsWith("#") && !lines[i].startsWith("|") && !/^[-*]\s+/.test(lines[i]) && !/^\d+\.\s+/.test(lines[i])) {
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !lines[i].startsWith("#") &&
+      !lines[i].startsWith("|") &&
+      !/^[-*]\s+/.test(lines[i]) &&
+      !/^\d+\.\s+/.test(lines[i]) &&
+      !isBoldLabelLine(lines[i])
+    ) {
       para.push(lines[i]);
       i += 1;
     }
@@ -123,6 +162,13 @@ function MarkdownBlocks({ markdown, compact }: { markdown: string; compact?: boo
         if (block.type === "h3") {
           return (
             <p key={index} className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+              {block.text}
+            </p>
+          );
+        }
+        if (block.type === "label") {
+          return (
+            <p key={index} className="pt-1 text-sm font-semibold text-zinc-900">
               {block.text}
             </p>
           );
