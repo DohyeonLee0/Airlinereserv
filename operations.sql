@@ -41,7 +41,40 @@
 
 
 -- ============================================================
--- 0. CLEANUP FOR RE-RUNNING THIS SCRIPT
+-- 0. SCHEMA MIGRATIONS (safe to re-run)
+-- ============================================================
+
+ALTER TABLE itineraries
+  ADD COLUMN IF NOT EXISTS leg_schedule_ids JSON NULL;
+
+-- Allow multiple calendar dates per connecting itinerary leg.
+ALTER TABLE flights DROP INDEX IF EXISTS itinerary_id;
+ALTER TABLE flights
+  ADD UNIQUE INDEX IF NOT EXISTS uq_itinerary_flight_segment (itinerary_id, flight_date, segment_order);
+
+UPDATE itineraries i
+JOIN (
+    SELECT
+        f.itinerary_id,
+        JSON_ARRAYAGG(f.schedule_id ORDER BY f.segment_order) AS leg_ids
+    FROM (
+        SELECT DISTINCT itinerary_id, segment_order, schedule_id
+        FROM flights
+    ) f
+    GROUP BY f.itinerary_id
+) src ON src.itinerary_id = i.itinerary_id
+SET i.leg_schedule_ids = src.leg_ids
+WHERE i.trip_type = 'Connecting'
+  AND i.leg_schedule_ids IS NULL;
+
+UPDATE itineraries
+SET leg_schedule_ids = JSON_ARRAY(2, 3)
+WHERE itinerary_id IN (7001, 7030)
+  AND leg_schedule_ids IS NULL;
+
+
+-- ============================================================
+-- 0B. CLEANUP FOR RE-RUNNING THIS SCRIPT
 -- ============================================================
 
 DROP PROCEDURE IF EXISTS generate_flights_from_schedule;
@@ -84,6 +117,7 @@ DROP PROCEDURE IF EXISTS upsert_airport;
 DROP PROCEDURE IF EXISTS delete_airport;
 DROP PROCEDURE IF EXISTS upsert_aircraft;
 DROP PROCEDURE IF EXISTS upsert_flight_schedule;
+DROP PROCEDURE IF EXISTS upsert_connecting_route;
 DROP PROCEDURE IF EXISTS upsert_promotion;
 DROP PROCEDURE IF EXISTS deactivate_promotion;
 
@@ -769,6 +803,10 @@ BEGIN
         NULL                   AS second_flight_number,
         NULL                   AS second_dep_time,
         NULL                   AS second_arr_time,
+        CAST(f.flight_id AS CHAR) AS flight_ids,
+        fs.flight_number       AS flight_numbers,
+        NULL                   AS connection_airports,
+        0                      AS stop_count,
         COUNT(fls.seat_number) AS available_seats,
         MIN(fls.price)         AS total_lowest_price
 
@@ -788,7 +826,7 @@ BEGIN
 
     UNION ALL
 
-    -- One-stop connecting flights
+    -- Ad-hoc two-leg pairs (different itineraries; bookable only if later linked)
     SELECT
         'ONE_STOP'              AS route_type,
         f1.flight_id            AS first_flight_id,
@@ -805,7 +843,10 @@ BEGIN
         fs2.flight_number       AS second_flight_number,
         fs2.dep_time            AS second_dep_time,
         fs2.arr_time            AS second_arr_time,
-        -- Approximation: cross-join inflates counts; LEAST is a conservative estimate.
+        CONCAT(f1.flight_id, ',', f2.flight_id) AS flight_ids,
+        CONCAT(fs1.flight_number, ',', fs2.flight_number) AS flight_numbers,
+        fs1.arr_airport         AS connection_airports,
+        1                       AS stop_count,
         LEAST(
             COUNT(DISTINCT fls1.seat_number),
             COUNT(DISTINCT fls2.seat_number)
@@ -827,6 +868,7 @@ BEGIN
       AND  f2.flight_date   = p_flight_date
       AND  f1.status        = 'Scheduled'
       AND  f2.status        = 'Scheduled'
+      AND  f1.itinerary_id <> f2.itinerary_id
       AND  fls1.is_available = 1
       AND  fls2.is_available = 1
       AND  (p_class_id IS NULL OR fls1.class_id = p_class_id)
@@ -839,6 +881,90 @@ BEGIN
         f2.flight_id, fs2.airline_id, fs2.flight_number,
         fs2.dep_airport, fs2.arr_airport,
         fs2.dep_time, fs2.arr_time
+
+    UNION ALL
+
+    -- Itinerary-based connecting routes (2+ legs, same itinerary_id)
+    SELECT
+        IF(COUNT(DISTINCT f.flight_id) = 2, 'ONE_STOP', 'CONNECTING') AS route_type,
+        MIN(CASE WHEN f.segment_order = 1 THEN f.flight_id END) AS first_flight_id,
+        MIN(CASE WHEN f.segment_order = 1 THEN fs.airline_id END) AS first_airline,
+        MIN(CASE WHEN f.segment_order = 1 THEN fs.flight_number END) AS first_flight_number,
+        i.departure_airport_code AS dep_airport,
+        i.arrival_airport_code   AS arr_airport,
+        f.flight_date            AS flight_date,
+        MIN(CASE WHEN f.segment_order = 1 THEN fs.dep_time END) AS first_dep_time,
+        MIN(CASE WHEN f.segment_order = 1 THEN fs.arr_time END) AS first_arr_time,
+        MIN(CASE WHEN f.segment_order = 1 THEN fs.arr_airport END) AS connection_airport,
+        MAX(CASE WHEN f.segment_order = 2 THEN f.flight_id END) AS second_flight_id,
+        MAX(CASE WHEN f.segment_order = 2 THEN fs.airline_id END) AS second_airline,
+        MAX(CASE WHEN f.segment_order = 2 THEN fs.flight_number END) AS second_flight_number,
+        MAX(CASE WHEN f.segment_order = 2 THEN fs.dep_time END) AS second_dep_time,
+        MAX(CASE WHEN f.segment_order = 2 THEN fs.arr_time END) AS second_arr_time,
+        GROUP_CONCAT(f.flight_id ORDER BY f.segment_order) AS flight_ids,
+        GROUP_CONCAT(fs.flight_number ORDER BY f.segment_order) AS flight_numbers,
+        GROUP_CONCAT(
+            CASE WHEN f.segment_order < mx.max_segment_order THEN fs.arr_airport END
+            ORDER BY f.segment_order SEPARATOR ','
+        ) AS connection_airports,
+        COUNT(DISTINCT f.flight_id) - 1 AS stop_count,
+        MIN(leg_stats.available_seats) AS available_seats,
+        SUM(leg_stats.min_price)     AS total_lowest_price
+
+    FROM itineraries i
+    JOIN flights f ON i.itinerary_id = f.itinerary_id
+    JOIN (
+        SELECT itinerary_id, flight_date, MAX(segment_order) AS max_segment_order
+        FROM flights
+        WHERE status = 'Scheduled'
+        GROUP BY itinerary_id, flight_date
+    ) mx ON mx.itinerary_id = i.itinerary_id AND mx.flight_date = f.flight_date
+    JOIN (
+        SELECT
+            fx.itinerary_id,
+            fx.flight_date,
+            fx.flight_id,
+            COUNT(fls2.seat_number) AS available_seats,
+            MIN(fls2.price)         AS min_price
+        FROM flights fx
+        JOIN flight_seats fls2
+          ON fx.flight_id = fls2.flight_id
+         AND fls2.is_available = 1
+         AND (p_class_id IS NULL OR fls2.class_id = p_class_id)
+        WHERE fx.status = 'Scheduled'
+        GROUP BY fx.itinerary_id, fx.flight_date, fx.flight_id
+    ) leg_stats
+      ON leg_stats.itinerary_id = i.itinerary_id
+     AND leg_stats.flight_date  = f.flight_date
+     AND leg_stats.flight_id    = f.flight_id
+    JOIN flight_schedules fs ON f.schedule_id = fs.schedule_id
+    WHERE i.trip_type = 'Connecting'
+      AND i.departure_airport_code = p_dep_airport
+      AND i.arrival_airport_code = p_arr_airport
+      AND f.flight_date = p_flight_date
+      AND f.status = 'Scheduled'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM flights f_a
+          JOIN flight_schedules fs_a ON f_a.schedule_id = fs_a.schedule_id
+          JOIN flights f_b
+            ON f_b.itinerary_id = f_a.itinerary_id
+           AND f_b.segment_order = f_a.segment_order + 1
+           AND f_b.flight_date = f_a.flight_date
+          JOIN flight_schedules fs_b ON f_b.schedule_id = fs_b.schedule_id
+          WHERE f_a.itinerary_id = i.itinerary_id
+            AND f_a.flight_date = p_flight_date
+            AND f_a.status = 'Scheduled'
+            AND f_b.status = 'Scheduled'
+            AND (
+                fs_a.arr_airport <> fs_b.dep_airport
+                OR fs_b.dep_time < ADDTIME(fs_a.arr_time, '01:00:00')
+            )
+      )
+    GROUP BY i.itinerary_id, f.flight_date, i.departure_airport_code, i.arrival_airport_code, mx.max_segment_order
+    HAVING COUNT(DISTINCT f.flight_id) >= 2
+       AND MIN(CASE WHEN f.segment_order = 1 THEN fs.dep_airport END) = i.departure_airport_code
+       AND MIN(leg_stats.available_seats) > 0
 
     ORDER BY total_lowest_price ASC, first_dep_time ASC;
 END //
@@ -2508,6 +2634,205 @@ BEGIN
         arr_time = VALUES(arr_time),
         valid_from = VALUES(valid_from),
         valid_to = VALUES(valid_to);
+END //
+
+CREATE PROCEDURE upsert_connecting_route (
+    IN p_itinerary_id        INT,
+    IN p_departure_airport   CHAR(3),
+    IN p_arrival_airport     CHAR(3),
+    IN p_valid_from          DATE,
+    IN p_valid_to            DATE,
+    IN p_legs_json           JSON,
+    IN p_operating_days_json JSON
+)
+BEGIN
+    DECLARE v_leg_count INT DEFAULT 0;
+    DECLARE v_idx INT DEFAULT 0;
+    DECLARE v_path VARCHAR(32);
+    DECLARE v_schedule_id INT;
+    DECLARE v_airline_id VARCHAR(10);
+    DECLARE v_flight_number VARCHAR(10);
+    DECLARE v_dep_airport CHAR(3);
+    DECLARE v_arr_airport CHAR(3);
+    DECLARE v_dep_time TIME;
+    DECLARE v_arr_time TIME;
+    DECLARE v_prev_arr_airport CHAR(3) DEFAULT NULL;
+    DECLARE v_prev_arr_time TIME DEFAULT NULL;
+    DECLARE v_first_dep_airport CHAR(3);
+    DECLARE v_last_arr_airport CHAR(3);
+    DECLARE v_day_count INT DEFAULT 0;
+    DECLARE v_day_idx INT DEFAULT 0;
+    DECLARE v_day VARCHAR(3);
+    DECLARE v_distinct_schedules INT DEFAULT 0;
+    DECLARE v_total_legs INT DEFAULT 0;
+    DECLARE v_operating_days_json JSON;
+
+    IF p_departure_airport = p_arrival_airport THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Departure and arrival airports must be different.';
+    END IF;
+
+    SET v_leg_count = JSON_LENGTH(p_legs_json);
+    IF v_leg_count IS NULL OR v_leg_count < 2 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Connecting routes require at least 2 legs.';
+    END IF;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_connecting_route_legs;
+    CREATE TEMPORARY TABLE tmp_connecting_route_legs (
+        leg_index     INT NOT NULL PRIMARY KEY,
+        schedule_id   INT NOT NULL,
+        airline_id    VARCHAR(10) NOT NULL,
+        flight_number VARCHAR(10) NOT NULL,
+        dep_airport   CHAR(3) NOT NULL,
+        arr_airport   CHAR(3) NOT NULL,
+        dep_time      TIME NOT NULL,
+        arr_time      TIME NOT NULL
+    );
+
+    WHILE v_idx < v_leg_count DO
+        SET v_path = CONCAT('$[', v_idx, ']');
+        SET v_schedule_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.schedule_id'))) AS UNSIGNED);
+        SET v_airline_id = JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.airline_id')));
+        SET v_flight_number = TRIM(JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.flight_number'))));
+        SET v_dep_airport = JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.dep_airport')));
+        SET v_arr_airport = JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.arr_airport')));
+        SET v_dep_time = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.dep_time'))) AS TIME);
+        SET v_arr_time = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_legs_json, CONCAT(v_path, '.arr_time'))) AS TIME);
+
+        IF v_schedule_id IS NULL OR v_schedule_id = 0
+           OR v_airline_id IS NULL OR v_airline_id = ''
+           OR v_flight_number IS NULL OR v_flight_number = ''
+           OR v_dep_airport IS NULL OR v_dep_airport = ''
+           OR v_arr_airport IS NULL OR v_arr_airport = ''
+           OR v_dep_time IS NULL OR v_arr_time IS NULL THEN
+            SET @connecting_err = CONCAT('Leg ', v_idx + 1, ' is missing required schedule fields.');
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = @connecting_err;
+        END IF;
+
+        INSERT INTO tmp_connecting_route_legs (
+            leg_index, schedule_id, airline_id, flight_number,
+            dep_airport, arr_airport, dep_time, arr_time
+        ) VALUES (
+            v_idx + 1, v_schedule_id, v_airline_id, v_flight_number,
+            v_dep_airport, v_arr_airport, v_dep_time, v_arr_time
+        );
+
+        SET v_idx = v_idx + 1;
+    END WHILE;
+
+    SELECT COUNT(DISTINCT schedule_id), COUNT(*)
+    INTO v_distinct_schedules, v_total_legs
+    FROM tmp_connecting_route_legs;
+
+    IF v_distinct_schedules <> v_total_legs THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Each leg needs a unique schedule ID.';
+    END IF;
+
+    SELECT dep_airport INTO v_first_dep_airport
+    FROM tmp_connecting_route_legs
+    WHERE leg_index = 1;
+
+    IF v_first_dep_airport <> p_departure_airport THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Leg 1 must depart from the route origin airport.';
+    END IF;
+
+    SELECT arr_airport INTO v_last_arr_airport
+    FROM tmp_connecting_route_legs
+    WHERE leg_index = (SELECT MAX(leg_index) FROM tmp_connecting_route_legs);
+
+    IF v_last_arr_airport <> p_arrival_airport THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'The final leg must arrive at the route destination airport.';
+    END IF;
+
+    SET v_idx = 1;
+    WHILE v_idx < (SELECT MAX(leg_index) FROM tmp_connecting_route_legs) DO
+        SELECT arr_airport, arr_time
+        INTO v_prev_arr_airport, v_prev_arr_time
+        FROM tmp_connecting_route_legs
+        WHERE leg_index = v_idx;
+
+        SELECT dep_airport, dep_time
+        INTO v_dep_airport, v_dep_time
+        FROM tmp_connecting_route_legs
+        WHERE leg_index = v_idx + 1;
+
+        IF v_prev_arr_airport <> v_dep_airport THEN
+            SET @connecting_err = CONCAT('Leg ', v_idx, ' must arrive where leg ', v_idx + 1, ' departs.');
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = @connecting_err;
+        END IF;
+
+        IF v_dep_time < ADDTIME(v_prev_arr_time, '01:00:00') THEN
+            SET @connecting_err = CONCAT(
+                'Layover between leg ', v_idx, ' and leg ', v_idx + 1, ' must be at least 1 hour.'
+            );
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = @connecting_err;
+        END IF;
+
+        SET v_idx = v_idx + 1;
+    END WHILE;
+
+    SET v_idx = 1;
+    WHILE v_idx <= (SELECT MAX(leg_index) FROM tmp_connecting_route_legs) DO
+        SELECT schedule_id, airline_id, flight_number, dep_airport, arr_airport, dep_time, arr_time
+        INTO v_schedule_id, v_airline_id, v_flight_number, v_dep_airport, v_arr_airport, v_dep_time, v_arr_time
+        FROM tmp_connecting_route_legs
+        WHERE leg_index = v_idx;
+
+        CALL upsert_flight_schedule(
+            v_schedule_id, v_airline_id, v_flight_number,
+            v_dep_airport, v_arr_airport, v_dep_time, v_arr_time,
+            p_valid_from, p_valid_to
+        );
+
+        SET v_idx = v_idx + 1;
+    END WHILE;
+
+    SET @leg_schedule_ids = (
+        SELECT JSON_ARRAYAGG(schedule_id ORDER BY leg_index)
+        FROM tmp_connecting_route_legs
+    );
+
+    INSERT INTO itineraries (
+        itinerary_id, trip_type, departure_airport_code, arrival_airport_code, leg_schedule_ids
+    )
+    VALUES (p_itinerary_id, 'Connecting', p_departure_airport, p_arrival_airport, @leg_schedule_ids)
+    ON DUPLICATE KEY UPDATE
+        trip_type = VALUES(trip_type),
+        departure_airport_code = VALUES(departure_airport_code),
+        arrival_airport_code = VALUES(arrival_airport_code),
+        leg_schedule_ids = @leg_schedule_ids;
+
+    SET v_operating_days_json = p_operating_days_json;
+    SET v_day_count = JSON_LENGTH(v_operating_days_json);
+    IF v_day_count IS NULL OR v_day_count = 0 THEN
+        SET v_operating_days_json = JSON_ARRAY('MON', 'WED', 'FRI');
+        SET v_day_count = 3;
+    END IF;
+
+    SET v_idx = 1;
+    WHILE v_idx <= (SELECT MAX(leg_index) FROM tmp_connecting_route_legs) DO
+        SELECT schedule_id INTO v_schedule_id
+        FROM tmp_connecting_route_legs
+        WHERE leg_index = v_idx;
+
+        DELETE FROM schedule_days WHERE schedule_id = v_schedule_id;
+
+        SET v_day_idx = 0;
+        WHILE v_day_idx < v_day_count DO
+            SET v_day = JSON_UNQUOTE(JSON_EXTRACT(v_operating_days_json, CONCAT('$[', v_day_idx, ']')));
+            INSERT INTO schedule_days (schedule_id, day_of_week)
+            VALUES (v_schedule_id, v_day);
+            SET v_day_idx = v_day_idx + 1;
+        END WHILE;
+
+        SET v_idx = v_idx + 1;
+    END WHILE;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_connecting_route_legs;
 END //
 
 CREATE PROCEDURE upsert_promotion (

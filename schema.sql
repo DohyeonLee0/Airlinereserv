@@ -151,6 +151,7 @@ CREATE TABLE itineraries (
     trip_type               VARCHAR(15) NOT NULL,
     departure_airport_code  CHAR(3) NOT NULL,
     arrival_airport_code    CHAR(3) NOT NULL,
+    leg_schedule_ids        JSON NULL,
     created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (departure_airport_code) REFERENCES airports(airport_code),
@@ -179,7 +180,7 @@ CREATE TABLE flights (
     FOREIGN KEY (aircraft_id) REFERENCES aircraft(aircraft_id),
 
     UNIQUE (schedule_id, flight_date),
-    UNIQUE (itinerary_id, segment_order),
+    UNIQUE (itinerary_id, flight_date, segment_order),
 
     CHECK (segment_order > 0),
     CHECK (leg_type IN ('Outbound', 'Return')),

@@ -232,13 +232,13 @@ CROSS JOIN (
 -- ER: https://dbdiagram.io/d/69d9fb748089629684700561
 -- ============================================================
 
-INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
+INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code, leg_schedule_ids)
 VALUES
-(10, 'OneWay', 'ICN', 'JFK'),
-(20, 'RoundTrip', 'ICN', 'JFK'),
-(30, 'Connecting', 'ICN', 'JFK'),
-(7001, 'Connecting', 'ICN', 'JFK'),
-(7030, 'Connecting', 'ICN', 'JFK');
+(10, 'OneWay', 'ICN', 'JFK', NULL),
+(20, 'RoundTrip', 'ICN', 'JFK', NULL),
+(30, 'Connecting', 'ICN', 'JFK', JSON_ARRAY(2, 3)),
+(7001, 'Connecting', 'ICN', 'JFK', JSON_ARRAY(2, 3)),
+(7030, 'Connecting', 'ICN', 'JFK', JSON_ARRAY(2, 3));
 
 -- One itinerary per direct seed flight (5000 + flight_id)
 INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
