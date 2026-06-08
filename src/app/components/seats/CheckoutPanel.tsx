@@ -11,8 +11,11 @@ import type { Seat } from "@/app/components/seats/seatMapUtils";
 type CheckoutPanelProps = {
   selected: Seat | null;
   flightIds: string[];
+  selectedByFlight?: Record<string, Seat>;
   promotions: Promotion[];
   selectedPromo: string;
+  promoDiscountByFlight?: Record<string, number>;
+  connectingEstimatedTotal?: number;
   paymentMethod: string;
   lookupBookingId: string;
   labels: {
@@ -42,8 +45,11 @@ type CheckoutPanelProps = {
 export default function CheckoutPanel({
   selected,
   flightIds,
+  selectedByFlight = {},
   promotions,
   selectedPromo,
+  promoDiscountByFlight = {},
+  connectingEstimatedTotal,
   paymentMethod,
   lookupBookingId,
   labels,
@@ -56,6 +62,9 @@ export default function CheckoutPanel({
 }: CheckoutPanelProps) {
   const discount = promotions.find((p) => p.promo_code === selectedPromo)?.discount_percent ?? 0;
   const estimated = selected ? selected.price * (1 - discount / 100) : 0;
+  const isConnecting = flightIds.length > 1;
+  const allLegsSelected = isConnecting && flightIds.every((id) => selectedByFlight[id]);
+  const showConnectingTotal = isConnecting && allLegsSelected && connectingEstimatedTotal != null;
 
   return (
     <div className="space-y-4">
@@ -127,8 +136,31 @@ export default function CheckoutPanel({
             )}
             <div className="mt-4 flex items-center justify-between border-t border-zinc-100 pt-4">
               <span className="text-sm text-zinc-500">{labels.estimated}</span>
-              <span className="text-xl font-bold tabular-nums text-zinc-900">${estimated.toLocaleString("en-US")}</span>
+              <span className="text-xl font-bold tabular-nums text-zinc-900">
+                ${(showConnectingTotal ? connectingEstimatedTotal : estimated).toLocaleString("en-US")}
+              </span>
             </div>
+            {showConnectingTotal ? (
+              <ul className="mt-3 space-y-1.5 border-t border-zinc-100 pt-3 text-xs text-zinc-600">
+                {flightIds.map((id, index) => {
+                  const seat = selectedByFlight[id];
+                  if (!seat) return null;
+                  const legDiscount = promoDiscountByFlight[id] ?? 0;
+                  const legTotal = seat.price * (1 - legDiscount / 100);
+                  return (
+                    <li key={id} className="flex items-center justify-between gap-2">
+                      <span>
+                        Leg {index + 1} · {seat.seat_number}
+                        {promoDiscountByFlight[id] ? ` · -${legDiscount}%` : ""}
+                      </span>
+                      <span className="font-medium tabular-nums text-zinc-800">
+                        ${legTotal.toLocaleString("en-US")}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
           </section>
         )}
 
@@ -150,7 +182,7 @@ export default function CheckoutPanel({
           </label>
         </div>
 
-        <Button type="submit" size="lg" className="mt-5 w-full" disabled={!selected}>
+        <Button type="submit" size="lg" className="mt-5 w-full" disabled={isConnecting ? !allLegsSelected : !selected}>
           {flightIds.length > 1 ? labels.checkout : labels.reserve}
         </Button>
 

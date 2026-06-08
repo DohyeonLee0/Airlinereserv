@@ -82,11 +82,12 @@ function SeatsContent() {
   const [seats, setSeats] = useState<Seat[]>([]);
   const [selected, setSelected] = useState<Seat | null>(null);
   const [selectedByFlight, setSelectedByFlight] = useState<Record<string, Seat>>({});
+  const [selectedPromoByFlight, setSelectedPromoByFlight] = useState<Record<string, string>>({});
+  const [promoDiscountByFlight, setPromoDiscountByFlight] = useState<Record<string, number>>({});
   const [message, setMessage] = useState("");
   const [alert, setAlert] = useState("");
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
-  const [selectedPromo, setSelectedPromo] = useState("");
   const [form, setForm] = useState({ payment_method: "CARD", lookup_booking_id: "" });
   const [bookingSuccess, setBookingSuccess] = useState<{ bookingId: string; seatLabel: string } | null>(null);
 
@@ -122,6 +123,17 @@ function SeatsContent() {
     setLedger(normalizeLedgerPayload(json.data));
   }
 
+  const selectedPromo = selectedPromoByFlight[activeFlightId] ?? "";
+
+  const connectingEstimatedTotal = useMemo(() => {
+    return flightIds.reduce((sum, id) => {
+      const seat = selectedByFlight[id];
+      if (!seat) return sum;
+      const discount = promoDiscountByFlight[id] ?? 0;
+      return sum + seat.price * (1 - discount / 100);
+    }, 0);
+  }, [flightIds, selectedByFlight, promoDiscountByFlight]);
+
   async function loadPromotions(seat: Seat) {
     const query = new URLSearchParams({
       flight_id: String(seat.flight_id),
@@ -130,20 +142,31 @@ function SeatsContent() {
     const response = await fetch(`/api/flights/promotions?${query}`);
     const json = await response.json();
     setPromotions(json.data?.promotions ?? []);
-    setSelectedPromo("");
+  }
+
+  function handlePromoChange(code: string) {
+    setSelectedPromoByFlight((prev) => ({ ...prev, [activeFlightId]: code }));
+    const discount = promotions.find((promo) => promo.promo_code === code)?.discount_percent ?? 0;
+    setPromoDiscountByFlight((prev) => {
+      const next = { ...prev };
+      if (code && discount > 0) next[activeFlightId] = discount;
+      else delete next[activeFlightId];
+      return next;
+    });
   }
 
   useEffect(() => {
     loadSeats();
   }, []);
 
-  function switchLeg(index: number) {
+  async function switchLeg(index: number) {
     const nextFlightId = flightIds[index];
     setActiveLegIndex(index);
-    setSelected(selectedByFlight[nextFlightId] ?? null);
+    const seat = selectedByFlight[nextFlightId] ?? null;
+    setSelected(seat);
     setPromotions([]);
-    setSelectedPromo("");
-    loadSeats(nextFlightId);
+    await loadSeats(nextFlightId);
+    if (seat) await loadPromotions(seat);
   }
 
   function chooseSeat(seat: Seat) {
@@ -190,7 +213,7 @@ function SeatsContent() {
       legsForCheckout.push({
         flight_id: seat.flight_id,
         seat_number: seat.seat_number,
-        promo_code: seat.flight_id === selected.flight_id ? selectedPromo || undefined : undefined
+        promo_code: selectedPromoByFlight[String(seat.flight_id)] || undefined
       });
     }
 
@@ -222,8 +245,9 @@ function SeatsContent() {
     setForm((prev) => ({ ...prev, lookup_booking_id: lastBookingId }));
     setSelected(null);
     setSelectedByFlight({});
+    setSelectedPromoByFlight({});
+    setPromoDiscountByFlight({});
     setPromotions([]);
-    setSelectedPromo("");
     await loadSeats();
     await loadLedger(lastBookingId);
   }
@@ -322,6 +346,7 @@ function SeatsContent() {
               >
                 {t.leg} {index + 1}: {id}
                 {selectedByFlight[id] ? ` · ${selectedByFlight[id].seat_number}` : ""}
+                {selectedPromoByFlight[id] ? ` · ${selectedPromoByFlight[id]}` : ""}
               </button>
             ))}
           </div>
@@ -377,8 +402,11 @@ function SeatsContent() {
           <CheckoutPanel
             selected={selected}
             flightIds={flightIds}
+            selectedByFlight={selectedByFlight}
             promotions={promotions}
             selectedPromo={selectedPromo}
+            connectingEstimatedTotal={connectingEstimatedTotal}
+            promoDiscountByFlight={promoDiscountByFlight}
             paymentMethod={form.payment_method}
             lookupBookingId={form.lookup_booking_id}
             labels={{
@@ -397,7 +425,7 @@ function SeatsContent() {
               lookup: t.lookup,
               myBookings: t.myBookings
             }}
-            onPromoChange={setSelectedPromo}
+            onPromoChange={handlePromoChange}
             onPaymentMethodChange={(method) => setForm((prev) => ({ ...prev, payment_method: method }))}
             onLookupBookingIdChange={(id) => setForm((prev) => ({ ...prev, lookup_booking_id: id }))}
             onReserve={reserve}
