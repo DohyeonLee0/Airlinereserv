@@ -1,6 +1,14 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import ChatWidget from "./components/chat/ChatWidget";
 import SiteHeader from "./components/SiteHeader";
 import "./globals.css";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap"
+});
 
 export const metadata: Metadata = {
   title: "Airline Reservation System",
@@ -9,10 +17,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="ko">
-      <body>
+    <html lang="en" className={inter.variable}>
+      <body className="font-sans antialiased">
         <SiteHeader />
-        <main className="mx-auto max-w-7xl px-6 py-8">{children}</main>
+        <main>{children}</main>
+        <ChatWidget />
       </body>
     </html>
   );

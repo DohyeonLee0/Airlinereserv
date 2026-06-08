@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { callProcedure, getPool } from "@/config/db";
-import { badRequest, conflict, created, dbErrorMessage, isConflictDbError, ok, readJson, requiredParams, serverError } from "./http";
+import { getSessionUser } from "@/lib/auth";
+import { isConnectingRoute, normalizeRouteRows } from "@/lib/routeSearch";
+import { badRequest, conflict, created, dbErrorMessage, forbidden, isConflictDbError, ok, readJson, requiredParams, serverError, unauthorized } from "./http";
 
 type SearchMode = "basic" | "advanced" | "promotions" | "connecting";
 
@@ -33,7 +35,7 @@ async function searchPromotions(request: NextRequest) {
       nullableNumber(parsed.values.get("max_price")),
       promoCode
     ]);
-    return ok({ mode: "promotions", promoCode, routes: rows });
+    return ok({ mode: "promotions", promoCode, routes: normalizeRouteRows(rows) });
   } catch (error) {
     return serverError(error);
   }
@@ -56,12 +58,12 @@ async function runSearch(request: NextRequest, mode: SearchMode) {
   } satisfies Record<Exclude<SearchMode, "promotions">, { sql: string; params: unknown[] }>;
 
   try {
-    const rows = await callProcedure(map[mode].sql, map[mode].params);
+    const rows = normalizeRouteRows(await callProcedure(map[mode].sql, map[mode].params));
     return ok({
       mode,
       routes: rows,
       direct: rows.filter((row) => row.route_type === "DIRECT"),
-      oneStop: rows.filter((row) => row.route_type === "ONE_STOP")
+      connecting: rows.filter((row) => isConnectingRoute(row))
     });
   } catch (error) {
     return serverError(error);
@@ -93,12 +95,14 @@ export async function recommendRoutes(request: NextRequest) {
   if (parsed.error || !parsed.values) return parsed.error;
 
   try {
-    const rows = await callProcedure("CALL recommend_routes(?, ?, ?, ?)", [
-      parsed.values.get("dep_airport"),
-      parsed.values.get("arr_airport"),
-      parsed.values.get("flight_date"),
-      nullableNumber(parsed.values.get("class_id")) ?? classIdFromQuery(null, parsed.values.get("class_name"))
-    ]);
+    const rows = normalizeRouteRows(
+      await callProcedure("CALL recommend_routes(?, ?, ?, ?)", [
+        parsed.values.get("dep_airport"),
+        parsed.values.get("arr_airport"),
+        parsed.values.get("flight_date"),
+        nullableNumber(parsed.values.get("class_id")) ?? classIdFromQuery(null, parsed.values.get("class_name"))
+      ])
+    );
     return ok({ routes: rows.slice(0, 5) });
   } catch (error) {
     return serverError(error);
@@ -177,15 +181,19 @@ export async function getSeats(request: NextRequest) {
 }
 
 export async function holdSeat(request: NextRequest) {
+  const sessionUser = await getSessionUser();
+  if (!sessionUser) return unauthorized();
+  if (sessionUser.role !== "Customer") return forbidden("Only customers can hold seats");
+
   const body = await readJson(request);
-  const required = ["hold_id", "user_id", "flight_id", "seat_number"];
+  const required = ["hold_id", "flight_id", "seat_number"];
   const missing = required.filter((key) => body[key] === undefined || body[key] === "");
   if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
 
   try {
     await callProcedure("CALL hold_seat(?, ?, ?, ?)", [
       Number(body.hold_id),
-      String(body.user_id),
+      sessionUser.user_id,
       Number(body.flight_id),
       String(body.seat_number)
     ]);
@@ -193,8 +201,8 @@ export async function holdSeat(request: NextRequest) {
   } catch (error) {
     if (isConflictDbError(error)) {
       const message = dbErrorMessage(error).includes("duplicate")
-        ? "이미 임시 홀드가 생성되었습니다. 좌석 상태를 새로고침한 뒤 다시 선택해 주세요."
-        : "선택하신 좌석은 이미 다른 고객이 결제 중이거나 예약 완료된 좌석입니다.";
+        ? "A hold already exists for this seat. Refresh the seat map and try again."
+        : "The selected seat is already held or reserved by another customer.";
       return conflict(message, "SEAT_HOLD_CONFLICT");
     }
     return serverError(error);

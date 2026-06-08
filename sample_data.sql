@@ -3,27 +3,23 @@
 -- sample_data.sql
 -- ICN-focused demo data using real airlines, airports, and routes.
 -- Run order: schema.sql -> sample_data.sql -> operations.sql
--- ============================================================
+-- Seed password for all users (bcrypt cost 12): Ars#CSE305!Demo2026
 
--- Sources used while preparing this demo seed:
--- - Incheon International Airport is ICN/RKSI and is the largest airport in Korea.
--- - Public airport route listings show ICN served by Korean Air, Asiana, Delta,
---   American, United, Singapore Airlines, Air France, Japan Airlines, and others.
--- - Public route listings include non-stop ICN routes such as JFK, LAX, NRT,
---   SIN, CDG, SFO, SEA, BKK, HKG, and KIX.
+SET @seed_password = '$2b$12$1MgZOW/IWItRV/bUHFE2x.uvppZ/KBDAcA.ny3aHjlhHN7qN8l59W';
 
 -- ============================================================
 -- USERS
 -- ============================================================
 
-INSERT INTO users (user_id, name, email, password, role)
+INSERT INTO users (user_id, first_name, middle_name, last_name, email, password, role, status)
 VALUES
-('cust01', 'John Smith', 'john.smith@example.com', 'pass123', 'Customer'),
-('cust02', 'Mary Jane Watson', 'mary.watson@example.com', 'pass123', 'Customer'),
-('cust03', 'Gildong Hong', 'gildong.hong@example.com', 'pass123', 'Customer'),
-('cust04', 'Minji Kim', 'minji.kim@example.com', 'pass123', 'Customer'),
-('staff01', 'Alice Manager', 'alice.manager@example.com', 'pass123', 'Staff');
-
+('super01', 'Sam', NULL, 'Supervisor', 'sam.supervisor@example.com', @seed_password, 'SuperAdmin', 'Active'),
+('admin01', 'Alex', NULL, 'Admin', 'alex.admin@example.com', @seed_password, 'Admin', 'Active'),
+('cust01', 'John', NULL, 'Smith', 'john.smith@example.com', @seed_password, 'Customer', 'Active'),
+('cust02', 'Mary', 'Jane', 'Watson', 'mary.watson@example.com', @seed_password, 'Customer', 'Active'),
+('cust03', 'Gildong', NULL, 'Hong', 'gildong.hong@example.com', @seed_password, 'Customer', 'Active'),
+('cust04', 'Minji', NULL, 'Kim', 'minji.kim@example.com', @seed_password, 'Customer', 'Active'),
+('staff01', 'Alice', NULL, 'Manager', 'alice.manager@example.com', @seed_password, 'Staff', 'Active');
 -- ============================================================
 -- AIRLINES
 -- ============================================================
@@ -207,7 +203,7 @@ INSERT INTO flight_schedules (
     valid_to
 )
 VALUES
-(1,  'KE', 'KE081', 'ICN', 'JFK', '10:00:00', '22:00:00', '2026-06-01', '2026-06-30'),
+(1,  'KE', 'KE081', 'ICN', 'JFK', '10:00:00', '22:00:00', '2025-07-01', '2026-06-30'),
 (2,  'KE', 'KE017', 'ICN', 'LAX', '08:00:00', '18:00:00', '2026-06-01', '2026-06-30'),
 (3,  'AA', 'AA010', 'LAX', 'JFK', '20:00:00', '23:30:00', '2026-06-01', '2026-06-30'),
 (4,  'KE', 'KE703', 'ICN', 'NRT', '09:00:00', '11:30:00', '2026-06-01', '2026-06-30'),
@@ -231,28 +227,116 @@ CROSS JOIN (
 ) days;
 
 -- ============================================================
--- GENERATED FLIGHTS
--- Seed a few concrete flights so the UI works immediately.
--- Staff generation procedures can add more later.
+-- ITINERARIES
+-- Template rows (10/20/30) used by flight generation; per-flight rows for seed data.
+-- ER: https://dbdiagram.io/d/69d9fb748089629684700561
 -- ============================================================
 
-INSERT INTO flights (flight_id, schedule_id, flight_date, aircraft_id, status)
+INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code, leg_schedule_ids)
 VALUES
-(1001, 1,  '2026-06-01', 101, 'Scheduled'),
-(1002, 2,  '2026-06-01', 102, 'Scheduled'),
-(1003, 3,  '2026-06-01', 401, 'Scheduled'),
-(1004, 4,  '2026-06-01', 101, 'Scheduled'),
-(1005, 5,  '2026-06-01', 201, 'Scheduled'),
-(1006, 6,  '2026-06-01', 301, 'Scheduled'),
-(1007, 7,  '2026-06-01', 501, 'Scheduled'),
-(1008, 8,  '2026-06-01', 601, 'Scheduled'),
-(1009, 9,  '2026-06-01', 701, 'Scheduled'),
-(1010, 10, '2026-06-01', 801, 'Scheduled'),
-(1011, 11, '2026-06-01', 102, 'Scheduled'),
-(1012, 12, '2026-06-01', 201, 'Scheduled'),
-(1013, 1,  '2026-06-03', 101, 'Scheduled'),
-(1014, 2,  '2026-06-03', 102, 'Scheduled'),
-(1015, 3,  '2026-06-03', 401, 'Scheduled');
+(10, 'OneWay', 'ICN', 'JFK', NULL),
+(20, 'RoundTrip', 'ICN', 'JFK', NULL),
+(30, 'Connecting', 'ICN', 'JFK', JSON_ARRAY(2, 3)),
+(7001, 'Connecting', 'ICN', 'JFK', JSON_ARRAY(2, 3)),
+(7030, 'Connecting', 'ICN', 'JFK', JSON_ARRAY(2, 3));
+
+-- One itinerary per direct seed flight (5000 + flight_id)
+INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
+SELECT
+    5000 + f.flight_id,
+    'OneWay',
+    fs.dep_airport,
+    fs.arr_airport
+FROM (
+    SELECT 1001 AS flight_id, 1 AS schedule_id UNION ALL
+    SELECT 1004, 4 UNION ALL SELECT 1005, 5 UNION ALL SELECT 1006, 6 UNION ALL
+    SELECT 1007, 7 UNION ALL SELECT 1008, 8 UNION ALL SELECT 1009, 9 UNION ALL
+    SELECT 1010, 10 UNION ALL SELECT 1011, 11 UNION ALL SELECT 1012, 12 UNION ALL
+    SELECT 1013, 1
+) f
+JOIN flight_schedules fs ON f.schedule_id = fs.schedule_id;
+
+-- ============================================================
+-- GENERATED FLIGHTS
+-- ============================================================
+
+INSERT INTO flights (flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status)
+VALUES
+(1001, 6001, 1,  '2026-06-01', 101, 1, 'Outbound', 'Scheduled'),
+(1002, 7001, 2,  '2026-06-01', 102, 1, 'Outbound', 'Scheduled'),
+(1003, 7001, 3,  '2026-06-01', 401, 2, 'Outbound', 'Scheduled'),
+(1004, 6004, 4,  '2026-06-01', 101, 1, 'Outbound', 'Scheduled'),
+(1005, 6005, 5,  '2026-06-12', 201, 1, 'Outbound', 'Scheduled'),
+(1006, 6006, 6,  '2026-06-15', 301, 1, 'Outbound', 'Scheduled'),
+(1007, 6007, 7,  '2026-06-01', 501, 1, 'Outbound', 'Scheduled'),
+(1008, 6008, 8,  '2026-06-01', 601, 1, 'Outbound', 'Scheduled'),
+(1009, 6009, 9,  '2026-06-01', 701, 1, 'Outbound', 'Scheduled'),
+(1010, 6010, 10, '2026-06-01', 801, 1, 'Outbound', 'Scheduled'),
+(1011, 6011, 11, '2026-06-01', 102, 1, 'Outbound', 'Scheduled'),
+(1012, 6012, 12, '2026-06-01', 201, 1, 'Outbound', 'Scheduled'),
+(1013, 6013, 1,  '2026-06-10', 101, 1, 'Outbound', 'Scheduled'),
+(1014, 7030, 2,  '2026-06-10', 102, 1, 'Outbound', 'Scheduled'),
+(1015, 7030, 3,  '2026-06-10', 401, 2, 'Outbound', 'Scheduled');
+
+-- Demo search window: daily ICN→JFK through June 15, 2026
+INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
+VALUES
+(6020, 'OneWay', 'ICN', 'JFK'),
+(6021, 'OneWay', 'ICN', 'JFK'),
+(6023, 'OneWay', 'ICN', 'JFK'),
+(6024, 'OneWay', 'ICN', 'JFK'),
+(6025, 'OneWay', 'ICN', 'JFK'),
+(6026, 'OneWay', 'ICN', 'JFK'),
+(6027, 'OneWay', 'ICN', 'JFK'),
+(6028, 'OneWay', 'ICN', 'NRT'),
+(6029, 'OneWay', 'ICN', 'SIN'),
+(6030, 'OneWay', 'ICN', 'CDG');
+
+INSERT INTO flights (flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status)
+VALUES
+(1020, 6020, 1, '2026-06-08', 101, 1, 'Outbound', 'Scheduled'),
+(1021, 6021, 1, '2026-06-09', 101, 1, 'Outbound', 'Scheduled'),
+(1023, 6023, 1, '2026-06-11', 101, 1, 'Outbound', 'Scheduled'),
+(1024, 6024, 1, '2026-06-12', 101, 1, 'Outbound', 'Scheduled'),
+(1025, 6025, 1, '2026-06-13', 101, 1, 'Outbound', 'Scheduled'),
+(1026, 6026, 1, '2026-06-14', 101, 1, 'Outbound', 'Scheduled'),
+(1027, 6027, 1, '2026-06-15', 101, 1, 'Outbound', 'Scheduled'),
+(1028, 6028, 4, '2026-06-11', 101, 1, 'Outbound', 'Scheduled'),
+(1029, 6029, 8, '2026-06-13', 601, 1, 'Outbound', 'Scheduled'),
+(1030, 6030, 9, '2026-06-15', 701, 1, 'Outbound', 'Scheduled');
+
+-- ============================================================
+-- 12-MONTH REVENUE DEMO FLIGHTS (Jul 2025 – May 2026)
+-- One KE081 ICN→JFK per month; June 2026 uses flights 1001+ above.
+-- ============================================================
+
+INSERT INTO itineraries (itinerary_id, trip_type, departure_airport_code, arrival_airport_code)
+VALUES
+(8001, 'OneWay', 'ICN', 'JFK'),
+(8002, 'OneWay', 'ICN', 'JFK'),
+(8003, 'OneWay', 'ICN', 'JFK'),
+(8004, 'OneWay', 'ICN', 'JFK'),
+(8005, 'OneWay', 'ICN', 'JFK'),
+(8006, 'OneWay', 'ICN', 'JFK'),
+(8007, 'OneWay', 'ICN', 'JFK'),
+(8008, 'OneWay', 'ICN', 'JFK'),
+(8009, 'OneWay', 'ICN', 'JFK'),
+(8010, 'OneWay', 'ICN', 'JFK'),
+(8011, 'OneWay', 'ICN', 'JFK');
+
+INSERT INTO flights (flight_id, itinerary_id, schedule_id, flight_date, aircraft_id, segment_order, leg_type, status)
+VALUES
+(2001, 8001, 1, '2025-07-07', 101, 1, 'Outbound', 'Completed'),
+(2002, 8002, 1, '2025-08-04', 101, 1, 'Outbound', 'Completed'),
+(2003, 8003, 1, '2025-09-01', 101, 1, 'Outbound', 'Completed'),
+(2004, 8004, 1, '2025-10-06', 101, 1, 'Outbound', 'Completed'),
+(2005, 8005, 1, '2025-11-03', 101, 1, 'Outbound', 'Completed'),
+(2006, 8006, 1, '2025-12-01', 101, 1, 'Outbound', 'Completed'),
+(2007, 8007, 1, '2026-01-05', 101, 1, 'Outbound', 'Completed'),
+(2008, 8008, 1, '2026-02-02', 101, 1, 'Outbound', 'Completed'),
+(2009, 8009, 1, '2026-03-02', 101, 1, 'Outbound', 'Completed'),
+(2010, 8010, 1, '2026-04-06', 101, 1, 'Outbound', 'Completed'),
+(2011, 8011, 1, '2026-05-04', 101, 1, 'Outbound', 'Completed');
 
 -- ============================================================
 -- FLIGHT-SPECIFIC SEATS AND PRICES

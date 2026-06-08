@@ -3,13 +3,26 @@
 @tailwind utilities;
 
 :root {
-  color: #101828;
-  background: #f5f7fb;
+  color: #18181b;
+  background: #ffffff;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
-  background: #f5f7fb;
+  background: #ffffff;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  color: #18181b;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(44, 125, 160, 0.2);
+  color: #012a4a;
 }
 
 input,

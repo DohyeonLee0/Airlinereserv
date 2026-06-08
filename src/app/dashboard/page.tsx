@@ -1,208 +1,254 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { useLocale } from "@/lib/useLocale";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowRight,
+  BarChart3,
+  CalendarDays,
+  ClipboardList,
+  DollarSign,
+  Gauge,
+  LayoutDashboard,
+  Plane,
+  ShieldCheck,
+  Ticket,
+  Users
+} from "lucide-react";
+import {
+  ChartPanel,
+  LoadFactorChart,
+  MonthlyRevenueChart,
+  SeatClassChart,
+  StatCard,
+  TopRoutesChart
+} from "@/app/components/dashboard/DashboardCharts";
+import { PageTitle } from "@/app/components/dashboard/PageTitle";
+import { formatDateTime } from "@/lib/formatDate";
 
-type ReportKey = "revenue-flight" | "revenue-month" | "load-factor" | "revenue-route" | "revenue-class";
-
-const copy = {
-  ko: {
-    title: "직원 포털",
-    subtitle: "저장 프로시저 기반 항공편 생성, 좌석 배포, 매출 및 탑승률 통계",
-    generateTab: "1. 항공편/좌석 자동 생성",
-    reportsTab: "2. 통계 그리드",
-    generateFlights: "항공편 자동 생성",
-    generateSeats: "좌석 및 가격 배포",
-    runGenerate: "생성 실행",
-    runSeats: "좌석 생성",
-    success: "처리가 완료되었습니다.",
-    error: "처리 중 오류가 발생했습니다.",
-    reportError: "리포트 조회 중 오류가 발생했습니다.",
-    reports: {
-      "revenue-flight": "항공편별 매출",
-      "revenue-month": "월별 매출",
-      "load-factor": "탑승률",
-      "revenue-route": "노선별 순위",
-      "revenue-class": "좌석 등급별 비율"
-    }
-  },
-  en: {
-    title: "Staff Portal",
-    subtitle: "Stored procedure based flight generation, seat distribution, revenue, and load factor reports",
-    generateTab: "1. Flight and Seat Generation",
-    reportsTab: "2. Report Grid",
-    generateFlights: "Generate Flights",
-    generateSeats: "Generate Seats and Prices",
-    runGenerate: "Run Generation",
-    runSeats: "Generate Seats",
-    success: "Completed successfully.",
-    error: "An error occurred while processing.",
-    reportError: "An error occurred while loading the report.",
-    reports: {
-      "revenue-flight": "Revenue by Flight",
-      "revenue-month": "Revenue by Month",
-      "load-factor": "Load Factor",
-      "revenue-route": "Revenue by Route",
-      "revenue-class": "Revenue by Seat Class"
-    }
-  }
+type OverviewData = {
+  kpis: {
+    active_bookings: number;
+    tickets_sold: number;
+    total_revenue: number;
+    scheduled_flights: number;
+    pending_approvals: number;
+    active_customers: number;
+    avg_load_factor: number;
+  };
+  monthlyRevenue: Array<{ month: string; revenue: number; tickets: number }>;
+  seatClass: Array<{ name: string; value: number; percent: number }>;
+  topRoutes: Array<{ route: string; revenue: number }>;
+  loadFactorTop: Array<{ label: string; loadFactor: number; revenue: number; soldSeats: number; totalSeats: number }>;
 };
 
-export default function DashboardPage() {
-  const { locale } = useLocale();
-  const t = copy[locale];
-  const [tab, setTab] = useState<"generate" | "reports">("generate");
-  const [reportKey, setReportKey] = useState<ReportKey>("load-factor");
-  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
-  const [message, setMessage] = useState("");
-  const [flightForm, setFlightForm] = useState({
-    schedule_id: "1",
-    aircraft_id: "101",
-    start_date: "2026-06-01",
-    end_date: "2026-06-30",
-    trip_type_id: "1"
-  });
-  const [seatForm, setSeatForm] = useState({
-    flight_id: "1001",
-    economy_price: "780",
-    business_price: "2400",
-    first_price: "5200"
-  });
+function revenueTrend(monthly: OverviewData["monthlyRevenue"]) {
+  if (monthly.length < 2) return undefined;
+  const sorted = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
+  const latest = sorted[sorted.length - 1];
+  const previous = sorted[sorted.length - 2];
+  if (!previous.revenue) return undefined;
+  const change = ((latest.revenue - previous.revenue) / previous.revenue) * 100;
+  const positive = change >= 0;
+  return {
+    positive,
+    label: `${positive ? "+" : ""}${change.toFixed(1)}% vs prior month`
+  };
+}
 
-  async function loadReport(key = reportKey) {
-    const response = await fetch(`/api/staff/reports/${key}`);
-    const json = await response.json();
-    setRows(json.data?.rows ?? []);
-    if (!response.ok) setMessage(json.message ?? t.reportError);
-  }
+const quickLinks = [
+  { href: "/dashboard/reports", label: "Analytics & Reports", description: "Revenue, load factor, route breakdowns", icon: BarChart3 },
+  { href: "/dashboard/bookings", label: "All Bookings", description: "Customer reservations and activity logs", icon: ClipboardList },
+  { href: "/dashboard/generate", label: "Flight Generation", description: "Create flights and seat inventory", icon: Plane }
+] as const;
+
+export default function DashboardOverviewPage() {
+  const [data, setData] = useState<OverviewData | null>(null);
+  const [error, setError] = useState("");
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
 
   useEffect(() => {
-    loadReport(reportKey);
-  }, [reportKey]);
+    fetch("/api/staff/dashboard/overview")
+      .then((res) => res.json())
+      .then((json) => {
+        if (!json.success) {
+          setError(json.message ?? "Failed to load dashboard");
+          return;
+        }
+        setData(json.data);
+        setLoadedAt(new Date());
+      })
+      .catch(() => setError("Failed to load dashboard"));
+  }, []);
 
-  async function postForm(event: FormEvent, endpoint: string, body: Record<string, string>) {
-    event.preventDefault();
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    const json = await response.json();
-    setMessage(response.ok ? t.success : json.message ?? t.error);
+  const trend = useMemo(() => (data ? revenueTrend(data.monthlyRevenue) : undefined), [data]);
+
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">{error}</div>
+    );
   }
 
-  const columns = rows.length ? Object.keys(rows[0]) : [];
+  if (!data) {
+    return (
+      <div className="space-y-6">
+        <div className="h-32 animate-pulse rounded-2xl bg-zinc-200" />
+        <div className="grid gap-4 lg:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="h-36 animate-pulse rounded-2xl bg-zinc-200" />
+          ))}
+        </div>
+        <div className="grid gap-6 lg:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-80 animate-pulse rounded-2xl bg-zinc-200" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const { kpis } = data;
 
   return (
     <div className="space-y-6">
-      <section>
-        <h1 className="text-2xl font-semibold text-navy">{t.title}</h1>
-        <p className="mt-2 text-sm text-slate-600">{t.subtitle}</p>
-      </section>
-
-      <div className="flex gap-2 border-b border-slate-200">
-        {[
-          ["generate", t.generateTab],
-          ["reports", t.reportsTab]
-        ].map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key as "generate" | "reports")}
-            className={`border-b-2 px-4 py-3 text-sm font-semibold ${
-              tab === key ? "border-navy text-navy" : "border-transparent text-slate-500"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="relative overflow-hidden rounded-2xl border border-zinc-200/80 bg-hero-gradient px-6 py-6 text-white shadow-lg sm:px-8 sm:py-7">
+        <div className="pointer-events-none absolute -right-16 -top-16 size-64 rounded-full bg-white/5" />
+        <div className="pointer-events-none absolute -bottom-20 right-24 size-48 rounded-full bg-brand/20 blur-2xl" />
+        <div className="relative flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest text-white/60">Operations Center</p>
+            <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">Network Performance</h1>
+            <p className="mt-2 max-w-xl text-sm text-white/75">
+              Real-time snapshot of revenue, seat utilization, and booking activity across all routes.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 font-medium backdrop-blur-sm">
+              <span className="size-1.5 rounded-full bg-emerald-400" />
+              Live data
+            </span>
+            {loadedAt ? (
+              <span className="rounded-full bg-white/10 px-3 py-1.5 text-white/70 backdrop-blur-sm">
+                Updated {formatDateTime(loadedAt)}
+              </span>
+            ) : null}
+          </div>
+        </div>
       </div>
 
-      {message && <div className="rounded border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">{message}</div>}
+      <section className="grid gap-4 lg:grid-cols-3">
+        <StatCard
+          size="hero"
+          label="Total Revenue"
+          value={`$${Number(kpis.total_revenue).toLocaleString("en-US")}`}
+          hint="Confirmed ticket seat prices"
+          icon={DollarSign}
+          accent="emerald"
+          trend={trend}
+        />
+        <StatCard
+          size="hero"
+          label="Tickets Sold"
+          value={String(kpis.tickets_sold)}
+          hint={`${kpis.active_bookings} active bookings`}
+          icon={Ticket}
+          accent="navy"
+        />
+        <StatCard
+          size="hero"
+          label="Avg Load Factor"
+          value={`${Number(kpis.avg_load_factor).toFixed(1)}%`}
+          hint="Network-wide seat utilization"
+          icon={Gauge}
+          accent="amber"
+        />
+      </section>
 
-      {tab === "generate" ? (
-        <section className="grid gap-6 lg:grid-cols-2">
-          <form
-            onSubmit={(event) => postForm(event, "/api/staff/flights/generate", flightForm)}
-            className="rounded border border-slate-200 bg-white p-5"
-          >
-            <h2 className="text-lg font-semibold text-navy">{t.generateFlights}</h2>
-            <div className="mt-5 grid gap-3 md:grid-cols-2">
-              {Object.keys(flightForm).map((key) => (
-                <label key={key} className="text-sm font-medium text-slate-700">
-                  {key}
-                  <input
-                    type={key.includes("date") ? "date" : "text"}
-                    value={flightForm[key as keyof typeof flightForm]}
-                    onChange={(event) => setFlightForm((prev) => ({ ...prev, [key]: event.target.value }))}
-                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2"
-                  />
-                </label>
-              ))}
-            </div>
-            <button className="mt-5 rounded bg-navy px-4 py-2 text-sm font-semibold text-white">{t.runGenerate}</button>
-          </form>
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Scheduled Flights" value={String(kpis.scheduled_flights)} icon={Plane} accent="sky" />
+        <StatCard label="Active Customers" value={String(kpis.active_customers)} icon={Users} />
+        <StatCard
+          label="Pending Approvals"
+          value={String(kpis.pending_approvals)}
+          icon={ShieldCheck}
+          accent={kpis.pending_approvals > 0 ? "amber" : "default"}
+          hint={kpis.pending_approvals > 0 ? "Requires admin review" : "All caught up"}
+        />
+        <StatCard
+          label="Reporting Period"
+          value={data.monthlyRevenue.length ? `${data.monthlyRevenue.length} mo.` : "—"}
+          icon={CalendarDays}
+          hint="Monthly revenue history"
+        />
+      </section>
 
-          <form
-            onSubmit={(event) => postForm(event, "/api/staff/flights/seats-generate", seatForm)}
-            className="rounded border border-slate-200 bg-white p-5"
-          >
-            <h2 className="text-lg font-semibold text-navy">{t.generateSeats}</h2>
-            <div className="mt-5 grid gap-3 md:grid-cols-2">
-              {Object.keys(seatForm).map((key) => (
-                <label key={key} className="text-sm font-medium text-slate-700">
-                  {key}
-                  <input
-                    value={seatForm[key as keyof typeof seatForm]}
-                    onChange={(event) => setSeatForm((prev) => ({ ...prev, [key]: event.target.value }))}
-                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2"
-                  />
-                </label>
-              ))}
-            </div>
-            <button className="mt-5 rounded bg-navy px-4 py-2 text-sm font-semibold text-white">{t.runSeats}</button>
-          </form>
-        </section>
-      ) : (
-        <section className="rounded border border-slate-200 bg-white p-5">
-          <div className="mb-5 flex flex-wrap gap-2">
-            {(Object.keys(t.reports) as ReportKey[]).map((key) => (
-              <button
-                key={key}
-                onClick={() => setReportKey(key)}
-                className={`rounded border px-3 py-2 text-sm font-semibold ${
-                  reportKey === key ? "border-navy bg-navy text-white" : "border-slate-200 text-slate-700"
-                }`}
+      <section className="grid gap-6 xl:grid-cols-3">
+        <ChartPanel
+          title="Monthly Revenue"
+          description="Ticket revenue trend across the network"
+          className="xl:col-span-2"
+        >
+          <MonthlyRevenueChart data={data.monthlyRevenue} />
+        </ChartPanel>
+        <ChartPanel title="Revenue by Seat Class" description="Cabin mix contribution">
+          <SeatClassChart data={data.seatClass} />
+        </ChartPanel>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-2">
+        <ChartPanel title="Top Routes" description="Highest-grossing city pairs">
+          <TopRoutesChart data={data.topRoutes} />
+        </ChartPanel>
+        <ChartPanel title="Load Factor Leaders" description="Flights with strongest utilization">
+          <LoadFactorChart data={data.loadFactorTop} />
+        </ChartPanel>
+      </section>
+
+      <section className="rounded-2xl border border-zinc-200/80 bg-white p-5 shadow-sm">
+        <div className="mb-4 flex items-center gap-2">
+          <LayoutDashboard className="size-4 text-brand" />
+          <h2 className="text-sm font-semibold text-zinc-900">Quick Actions</h2>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {quickLinks.map((link) => {
+            const Icon = link.icon;
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="group flex items-start gap-3 rounded-xl border border-zinc-100 bg-zinc-50/50 p-4 transition-colors hover:border-brand/30 hover:bg-brand-light/40"
               >
-                {t.reports[key]}
-              </button>
-            ))}
-          </div>
-          <div className="overflow-auto">
-            <table className="min-w-full border-collapse text-sm">
-              <thead>
-                <tr className="bg-slate-50 text-left text-slate-600">
-                  {columns.map((column) => (
-                    <th key={column} className="border border-slate-200 px-3 py-2 font-semibold">
-                      {column}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rowIndex) => (
-                  <tr key={rowIndex} className="hover:bg-slate-50">
-                    {columns.map((column) => (
-                      <td key={column} className="border border-slate-200 px-3 py-2">
-                        {String(row[column] ?? "")}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-white text-brand shadow-sm ring-1 ring-zinc-200/80">
+                  <Icon className="size-4" strokeWidth={1.75} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="flex items-center gap-1 text-sm font-semibold text-zinc-900 group-hover:text-navy">
+                    {link.label}
+                    <ArrowRight className="size-3.5 opacity-0 transition-opacity group-hover:opacity-100" />
+                  </p>
+                  <p className="mt-0.5 text-xs text-zinc-500">{link.description}</p>
+                </div>
+              </Link>
+            );
+          })}
+          {kpis.pending_approvals > 0 ? (
+            <Link
+              href="/dashboard/approvals"
+              className="group flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50/80 p-4 transition-colors hover:bg-amber-50"
+            >
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-white text-amber-600 shadow-sm ring-1 ring-amber-200/80">
+                <ShieldCheck className="size-4" strokeWidth={1.75} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-amber-900">
+                  {kpis.pending_approvals} Pending Approval{kpis.pending_approvals === 1 ? "" : "s"}
+                </p>
+                <p className="mt-0.5 text-xs text-amber-700/80">Review staff registration requests</p>
+              </div>
+            </Link>
+          ) : null}
+        </div>
+      </section>
     </div>
   );
 }
