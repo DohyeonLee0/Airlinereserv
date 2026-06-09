@@ -11,6 +11,7 @@ import {
 } from "@/app/components/customer/bookingFilters";
 import CustomerBookingsToolbar, { BookingsPagination } from "@/app/components/customer/CustomerBookingsToolbar";
 import { groupBookingRows, type BookingGroup, type BookingRow } from "@/app/components/customer/bookingTypes";
+import { StaffConfirmModal, type StaffConfirmState } from "@/app/components/dashboard/StaffConfirmModal";
 import Button from "@/app/components/ui/Button";
 import { canCancelBookingByLegs, isPastBooking } from "@/lib/bookingPolicy";
 import { formatDate, formatDateTime } from "@/lib/formatDate";
@@ -32,6 +33,7 @@ export default function BookingsPage() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [filters, setFilters] = useState<BookingFilters>(DEFAULT_BOOKING_FILTERS);
   const [page, setPage] = useState(1);
+  const [cancelConfirm, setCancelConfirm] = useState<(StaffConfirmState & { bookingId: number }) | null>(null);
 
   const groupedBookings = useMemo(() => groupBookingRows(bookings), [bookings]);
 
@@ -94,8 +96,21 @@ export default function BookingsPage() {
     loadBookings();
   }, []);
 
-  async function cancelBooking(bookingId: number) {
-    if (!confirm(`Cancel booking #${bookingId} and process a full refund?`)) return;
+  function requestCancelBooking(bookingId: number) {
+    setCancelConfirm({
+      bookingId,
+      title: "Cancel booking?",
+      message: `Cancel booking #${bookingId} and process a full refund?`,
+      confirmLabel: "Cancel & refund",
+      cancelLabel: "Keep booking",
+      pendingLabel: "Cancelling…",
+      tone: "danger"
+    });
+  }
+
+  async function confirmCancelBooking() {
+    if (!cancelConfirm) return;
+    const bookingId = cancelConfirm.bookingId;
     setLoadingId(bookingId);
     setMessage("");
     const response = await fetch("/api/bookings/cancel", {
@@ -105,6 +120,7 @@ export default function BookingsPage() {
     });
     const json = await response.json();
     setLoadingId(null);
+    setCancelConfirm(null);
     if (!response.ok || !json.success) {
       setMessage(json.message ?? "Cancellation failed");
       return;
@@ -119,6 +135,15 @@ export default function BookingsPage() {
 
   return (
     <div className="space-y-6">
+      <StaffConfirmModal
+        confirm={cancelConfirm}
+        isPending={cancelConfirm != null && loadingId === cancelConfirm.bookingId}
+        onConfirm={() => void confirmCancelBooking()}
+        onCancel={() => {
+          if (loadingId == null) setCancelConfirm(null);
+        }}
+      />
+
       {message && (
         <p
           className={cn(
@@ -189,7 +214,7 @@ export default function BookingsPage() {
                   expanded={expandedId === booking.booking_id}
                   loadingId={loadingId}
                   onToggleExpand={() => setExpandedId(expandedId === booking.booking_id ? null : booking.booking_id)}
-                  onCancel={cancelBooking}
+                  onCancel={requestCancelBooking}
                 />
               ))}
 

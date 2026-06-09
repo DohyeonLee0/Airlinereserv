@@ -8,6 +8,7 @@ import {
   sortSearchResults,
   type JourneyType
 } from "@/lib/flightSearch";
+import { enrichConnectingRoutesWithPromos } from "@/lib/promotionPricing";
 import { isConnectingRoute, normalizeRouteRows, type RouteRow } from "@/lib/routeSearch";
 import { badRequest, conflict, created, dbErrorMessage, forbidden, isConflictDbError, ok, readJson, requiredParams, serverError, unauthorized } from "./http";
 
@@ -93,7 +94,7 @@ async function fetchRecommendationScores(
   return normalizeRouteRows(rows);
 }
 
-async function searchPromoRoutes(
+async function searchDirectPromoRoutes(
   depAirport: string,
   arrAirport: string,
   flightDate: string,
@@ -109,6 +110,28 @@ async function searchPromoRoutes(
     null
   ]);
   return promoRowsToRoutes(rows).filter(hasActivePromotion);
+}
+
+async function searchPromoRoutes(
+  depAirport: string,
+  arrAirport: string,
+  flightDate: string,
+  classId: number | null,
+  maxPrice: number | null
+): Promise<RouteRow[]> {
+  const [directPromoRoutes, allRoutes] = await Promise.all([
+    searchDirectPromoRoutes(depAirport, arrAirport, flightDate, classId, maxPrice),
+    searchDirectAndConnectingRoutes(depAirport, arrAirport, flightDate, classId)
+  ]);
+
+  const connectingCandidates = allRoutes.filter((row) => isConnectingRoute(row));
+  const connectingPromoRoutes = await enrichConnectingRoutesWithPromos(
+    connectingCandidates,
+    classId,
+    maxPrice
+  );
+
+  return [...directPromoRoutes, ...connectingPromoRoutes];
 }
 
 async function searchDirectRoutes(

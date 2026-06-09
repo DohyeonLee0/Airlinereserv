@@ -33,9 +33,66 @@ function formatMonthLabel(month: string) {
   return date.toLocaleDateString("en-US", { month: "short", year: "numeric" });
 }
 
-type TooltipPayload = { color?: string; name?: string; value?: number; dataKey?: string };
+function formatFlightDate(value: unknown) {
+  if (value == null || value === "") return undefined;
+  const raw = String(value).trim();
+  const date = new Date(raw.includes("T") ? raw : `${raw}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
 
-function ChartTooltip({
+export function buildFlightChartPoint(row: Record<string, unknown>) {
+  const flight = String(row.flight_number ?? "—");
+  const dep = String(row.dep_airport ?? "?");
+  const arr = String(row.arr_airport ?? "?");
+  const flightDate = formatFlightDate(row.flight_date);
+  const routeDetail = `${dep} → ${arr}`;
+
+  return {
+    flight,
+    flightDate,
+    routeDetail,
+    label: flightDate ? `${flight} · ${flightDate}` : `${flight} (${dep}→${arr})`,
+    route: flightDate ? `${flight} · ${flightDate}` : `${flight} · ${dep}→${arr}`
+  };
+}
+
+type TooltipPayload = {
+  color?: string;
+  name?: string;
+  value?: number;
+  dataKey?: string;
+  payload?: Record<string, unknown>;
+};
+
+export function resolveTooltipLabel(label: unknown, payload?: TooltipPayload[]) {
+  const row = payload?.[0]?.payload;
+  if (row) {
+    if (typeof row.route === "string" && row.route) return row.route;
+    if (typeof row.label === "string" && row.label) return row.label;
+    if (typeof row.monthLabel === "string" && row.monthLabel) return row.monthLabel;
+    if (typeof row.name === "string" && row.name) return row.name;
+  }
+
+  const text = String(label ?? "");
+  if (/^\d{4}-\d{2}$/.test(text)) return formatMonthLabel(text);
+  return text;
+}
+
+function resolveTooltipContext(payload?: TooltipPayload[]) {
+  const row = payload?.[0]?.payload;
+  if (!row) return [];
+
+  const lines: string[] = [];
+  if (typeof row.routeDetail === "string" && row.routeDetail) lines.push(row.routeDetail);
+  if (typeof row.flightDate === "string" && row.flightDate) {
+    const label = resolveTooltipLabel(undefined, payload);
+    if (!label.includes(row.flightDate)) lines.push(row.flightDate);
+  }
+  return lines;
+}
+
+export function ChartTooltip({
   active,
   payload,
   label,
@@ -43,14 +100,21 @@ function ChartTooltip({
 }: {
   active?: boolean;
   payload?: TooltipPayload[];
-  label?: string;
+  label?: string | number;
   valueFormatter?: (value: number, dataKey?: string) => [string, string];
 }) {
   if (!active || !payload?.length) return null;
+  const displayLabel = resolveTooltipLabel(label, payload);
+  const contextLines = resolveTooltipContext(payload);
 
   return (
     <div className="rounded-xl border border-zinc-200/80 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
-      {label ? <p className="mb-1.5 text-xs font-medium text-zinc-500">{formatMonthLabel(String(label)) || label}</p> : null}
+      {displayLabel ? <p className="mb-1 text-xs font-semibold text-zinc-800">{displayLabel}</p> : null}
+      {contextLines.map((line) => (
+        <p key={line} className="mb-1 text-xs text-zinc-500">
+          {line}
+        </p>
+      ))}
       <div className="space-y-1">
         {payload.map((entry, index) => {
           const raw = Number(entry.value ?? 0);
@@ -96,8 +160,16 @@ export function ChartPanel({
 
 type MonthlyPoint = { month: string; revenue: number; tickets: number };
 type ClassPoint = { name: string; value: number; percent: number };
-type RoutePoint = { route: string; revenue: number };
-type LoadPoint = { label: string; loadFactor: number; revenue: number; soldSeats?: number; totalSeats?: number };
+type RoutePoint = { route: string; revenue: number; routeDetail?: string; flightDate?: string };
+type LoadPoint = {
+  label: string;
+  loadFactor: number;
+  revenue: number;
+  soldSeats?: number;
+  totalSeats?: number;
+  routeDetail?: string;
+  flightDate?: string;
+};
 
 export function MonthlyRevenueChart({ data }: { data: MonthlyPoint[] }) {
   const chartData = data.map((row) => ({ ...row, monthLabel: formatMonthLabel(row.month) }));
@@ -121,13 +193,15 @@ export function MonthlyRevenueChart({ data }: { data: MonthlyPoint[] }) {
           width={48}
         />
         <Tooltip
-          content={
+          shared={false}
+          content={(props) => (
             <ChartTooltip
+              {...props}
               valueFormatter={(value, key) =>
                 key === "tickets" ? [String(value), "Tickets"] : [formatCurrency(value), "Revenue"]
               }
             />
-          }
+          )}
         />
         <Area
           type="monotone"
@@ -164,7 +238,12 @@ export function SeatClassChart({ data }: { data: ClassPoint[] }) {
             <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />
           ))}
         </Pie>
-        <Tooltip content={<ChartTooltip valueFormatter={(v) => [formatCurrency(v), "Revenue"]} />} />
+        <Tooltip
+          shared={false}
+          content={(props) => (
+            <ChartTooltip {...props} valueFormatter={(v) => [formatCurrency(v), "Revenue"]} />
+          )}
+        />
         <Legend
           verticalAlign="bottom"
           iconType="circle"
@@ -191,12 +270,17 @@ export function TopRoutesChart({ data }: { data: RoutePoint[] }) {
         <YAxis
           type="category"
           dataKey="route"
-          width={88}
-          tick={{ fontSize: 11, fill: "#52525b" }}
+          width={128}
+          tick={{ fontSize: 10, fill: "#52525b" }}
           tickLine={false}
           axisLine={false}
         />
-        <Tooltip content={<ChartTooltip valueFormatter={(v) => [formatCurrency(v), "Revenue"]} />} />
+        <Tooltip
+          shared={false}
+          content={(props) => (
+            <ChartTooltip {...props} valueFormatter={(v) => [formatCurrency(v), "Revenue"]} />
+          )}
+        />
         <Bar dataKey="revenue" name="Revenue" fill="#002060" radius={[0, 4, 4, 0]} maxBarSize={28} />
       </BarChart>
     </ResponsiveContainer>
@@ -230,12 +314,17 @@ export function LoadFactorChart({ data }: { data: LoadPoint[] }) {
           width={44}
         />
         <Tooltip
+          shared={false}
           content={({ active, payload, label }) => {
             if (!active || !payload?.length) return null;
             const row = payload[0]?.payload as LoadPoint;
             return (
               <div className="rounded-xl border border-zinc-200/80 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
-                <p className="mb-1.5 text-xs font-medium text-zinc-500">{label}</p>
+                <p className="mb-1 text-xs font-semibold text-zinc-800">{label}</p>
+                {row.routeDetail ? <p className="mb-1 text-xs text-zinc-500">{row.routeDetail}</p> : null}
+                {row.flightDate && !String(label).includes(row.flightDate) ? (
+                  <p className="mb-1 text-xs text-zinc-500">{row.flightDate}</p>
+                ) : null}
                 <p className="text-xs text-zinc-600">
                   Load factor:{" "}
                   <span className="font-semibold text-zinc-900">{Number(row.loadFactor).toFixed(1)}%</span>

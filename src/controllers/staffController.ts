@@ -3,7 +3,14 @@ import { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
 import { isStaffRole } from "@/lib/roles";
-import { badRequest, created, ok, readJson, requiredParams, serverError, unauthorized, forbidden } from "./http";
+import {
+  assertNoAircraftConflicts,
+  buildAircraftConflictMessage,
+  loadAircraftFlightSlots,
+  loadScheduleTimings,
+  type AircraftFlightSlot
+} from "@/lib/aircraftScheduleConflict";
+import { badRequest, conflict, created, ok, readJson, requiredParams, serverError, unauthorized, forbidden } from "./http";
 
 async function requireStaffSession() {
   const user = await getSessionUser();
@@ -149,19 +156,57 @@ export async function generateConnectingFlights(request: NextRequest) {
       legs.push({ schedule_id: scheduleId, aircraft_id: aircraftId });
     }
 
+    const scheduleTimings = await loadScheduleTimings(connection, scheduleIds);
+    for (const scheduleId of scheduleIds) {
+      if (!scheduleTimings.has(scheduleId)) {
+        await connection.rollback();
+        return badRequest(`Schedule #${scheduleId} was not found. Save the connecting route again, then retry.`);
+      }
+    }
+
+    const aircraftIds = [...new Set(legs.map((leg) => leg.aircraft_id))];
+    const existingSlots = await loadAircraftFlightSlots(connection, aircraftIds, startDate, endDate);
+    const generationCandidates: AircraftFlightSlot[] = [];
+
+    for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
+      const dayName = dayNameFromIso(currentDate);
+      const operates = await legsOperateOnDay(connection, scheduleIds, dayName);
+      if (!operates) continue;
+
+      for (const leg of legs) {
+        const timing = scheduleTimings.get(leg.schedule_id)!;
+        generationCandidates.push({
+          flightDate: currentDate,
+          aircraftId: leg.aircraft_id,
+          scheduleId: leg.schedule_id,
+          depTime: String(timing.dep_time),
+          arrTime: String(timing.arr_time),
+          flightNumber: String(timing.flight_number)
+        });
+      }
+    }
+
+    const aircraftConflict = assertNoAircraftConflicts(generationCandidates, existingSlots);
+    if (aircraftConflict) {
+      await connection.rollback();
+      return conflict(
+        buildAircraftConflictMessage(aircraftConflict.conflict, aircraftConflict.other),
+        "AIRCRAFT_SCHEDULE_CONFLICT"
+      );
+    }
+
     const [maxFlightRows] = await connection.query<RowDataPacket[]>(
       "SELECT COALESCE(MAX(flight_id), 0) AS max_id FROM flights FOR UPDATE"
     );
     let nextFlightId = Number(maxFlightRows[0]?.max_id ?? 0) + 1;
     let generated = 0;
-    let candidateDays = 0;
+    const candidateDays = new Set(generationCandidates.map((candidate) => candidate.flightDate)).size;
     const newFlightIds: number[] = [];
 
     for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
       const dayName = dayNameFromIso(currentDate);
       const operates = await legsOperateOnDay(connection, scheduleIds, dayName);
       if (!operates) continue;
-      candidateDays += 1;
 
       for (let segmentOrder = 0; segmentOrder < legs.length; segmentOrder += 1) {
         const leg = legs[segmentOrder];
@@ -246,10 +291,22 @@ export async function generateDirectFlights(request: NextRequest) {
     await connection.beginTransaction();
 
     const [scheduleRows] = await connection.query<
-      Array<RowDataPacket & { valid_from: string; valid_to: string; dep_airport: string; arr_airport: string }>
-    >("SELECT valid_from, valid_to, dep_airport, arr_airport FROM flight_schedules WHERE schedule_id = ?", [
-      scheduleId
-    ]);
+      Array<
+        RowDataPacket & {
+          valid_from: string;
+          valid_to: string;
+          dep_airport: string;
+          arr_airport: string;
+          dep_time: string;
+          arr_time: string;
+          flight_number: string;
+        }
+      >
+    >(
+      `SELECT valid_from, valid_to, dep_airport, arr_airport, dep_time, arr_time, flight_number
+       FROM flight_schedules WHERE schedule_id = ?`,
+      [scheduleId]
+    );
 
     const schedule = scheduleRows[0];
     if (!schedule) {
@@ -273,6 +330,33 @@ export async function generateDirectFlights(request: NextRequest) {
       return badRequest("Selected aircraft does not exist.");
     }
 
+    const existingSlots = await loadAircraftFlightSlots(connection, [aircraftId], startDate, endDate);
+    const generationCandidates: AircraftFlightSlot[] = [];
+
+    for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
+      const dayName = dayNameFromIso(currentDate);
+      const operates = await legsOperateOnDay(connection, [scheduleId], dayName);
+      if (!operates) continue;
+
+      generationCandidates.push({
+        flightDate: currentDate,
+        aircraftId,
+        scheduleId,
+        depTime: String(schedule.dep_time),
+        arrTime: String(schedule.arr_time),
+        flightNumber: String(schedule.flight_number)
+      });
+    }
+
+    const aircraftConflict = assertNoAircraftConflicts(generationCandidates, existingSlots);
+    if (aircraftConflict) {
+      await connection.rollback();
+      return conflict(
+        buildAircraftConflictMessage(aircraftConflict.conflict, aircraftConflict.other),
+        "AIRCRAFT_SCHEDULE_CONFLICT"
+      );
+    }
+
     const [maxFlightRows] = await connection.query<RowDataPacket[]>(
       "SELECT COALESCE(MAX(flight_id), 0) AS max_id FROM flights FOR UPDATE"
     );
@@ -284,15 +368,11 @@ export async function generateDirectFlights(request: NextRequest) {
     let nextItineraryId = Number(maxItineraryRows[0]?.max_id ?? 0) + 1;
 
     let generated = 0;
-    let candidateDays = 0;
+    let candidateDays = generationCandidates.length;
     const newFlightIds: number[] = [];
 
-    for (let currentDate = startDate; currentDate <= endDate; currentDate = addDaysIso(currentDate, 1)) {
-      const dayName = dayNameFromIso(currentDate);
-      const operates = await legsOperateOnDay(connection, [scheduleId], dayName);
-      if (!operates) continue;
-      candidateDays += 1;
-
+    for (const candidate of generationCandidates) {
+      const currentDate = candidate.flightDate;
       const flightId = nextFlightId;
       const itineraryId = nextItineraryId;
       nextFlightId += 1;
@@ -493,13 +573,29 @@ export async function getDashboardOverview() {
 
     const loadFactorTop = (loadFactor as Record<string, unknown>[])
       .filter((row) => Number(row.sold_seats ?? 0) > 0 && Number(row.total_seats ?? 0) > 0)
-      .map((row) => ({
-        label: `${row.flight_number} (${row.dep_airport}→${row.arr_airport})`,
-        loadFactor: Number(row.load_factor_percent ?? 0),
-        soldSeats: Number(row.sold_seats ?? 0),
-        totalSeats: Number(row.total_seats ?? 0),
-        revenue: Number(row.total_revenue ?? 0)
-      }))
+      .map((row) => {
+        const dep = String(row.dep_airport ?? "?");
+        const arr = String(row.arr_airport ?? "?");
+        const flight = String(row.flight_number ?? "—");
+        const rawDate = row.flight_date;
+        const flightDate =
+          rawDate == null || rawDate === ""
+            ? undefined
+            : new Date(String(rawDate).includes("T") ? String(rawDate) : `${String(rawDate)}T00:00:00`).toLocaleDateString(
+                "en-US",
+                { month: "short", day: "numeric", year: "numeric" }
+              );
+
+        return {
+          label: flightDate ? `${flight} · ${flightDate}` : `${flight} (${dep}→${arr})`,
+          routeDetail: `${dep} → ${arr}`,
+          flightDate,
+          loadFactor: Number(row.load_factor_percent ?? 0),
+          soldSeats: Number(row.sold_seats ?? 0),
+          totalSeats: Number(row.total_seats ?? 0),
+          revenue: Number(row.total_revenue ?? 0)
+        };
+      })
       .sort((a, b) => b.loadFactor - a.loadFactor)
       .slice(0, 6);
 
@@ -517,6 +613,11 @@ export async function getDashboardOverview() {
       percent: Number(row.revenue_percentage ?? 0)
     }));
 
+    const currentMonth = (() => {
+      const now = new Date();
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    })();
+
     const monthlyTotals = Object.values(
       monthly.reduce<Record<string, { month: string; revenue: number; tickets: number }>>((acc, row) => {
         if (!acc[row.month]) acc[row.month] = { month: row.month, revenue: 0, tickets: 0 };
@@ -524,7 +625,9 @@ export async function getDashboardOverview() {
         acc[row.month].tickets += row.tickets;
         return acc;
       }, {})
-    ).sort((a, b) => a.month.localeCompare(b.month));
+    )
+      .filter((row) => row.revenue > 0 || row.tickets > 0 || row.month <= currentMonth)
+      .sort((a, b) => a.month.localeCompare(b.month));
 
     return ok({
       kpis: kpiRows[0] ?? {},

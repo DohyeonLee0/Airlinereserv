@@ -8,6 +8,7 @@ import { AircraftSeatEditor } from "@/app/components/dashboard/master/AircraftSe
 import { masterInputClass, MasterFormField } from "@/app/components/dashboard/master/MasterFormField";
 import MasterRecordTable from "@/app/components/dashboard/master/MasterRecordTable";
 import { useMasterLists, type AircraftRow } from "@/app/components/dashboard/master/useMasterLists";
+import { StaffConfirmModal, type StaffConfirmState } from "@/app/components/dashboard/StaffConfirmModal";
 import { StaffAlertModal, useStaffAction } from "@/app/components/dashboard/useStaffAction";
 import {
   defaultSeatsForModel,
@@ -30,9 +31,11 @@ type ExtendedAircraftRow = AircraftRow & {
 
 export default function AircraftMasterPage() {
   const { airlines, aircraft, loading, error, reload } = useMasterLists({ airlines: true, aircraft: true });
-  const { alert, showAlert, clearAlert, postJson } = useStaffAction(reload);
+  const { alert, showAlert, clearAlert, postJson, deleteJson } = useStaffAction(reload);
   const [templates, setTemplates] = useState<SeatTemplateListItem[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<(StaffConfirmState & { aircraftId: number }) | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [loadingSeats, setLoadingSeats] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -186,6 +189,30 @@ export default function AircraftMasterPage() {
     startNew();
   }
 
+  function requestDelete(row: ExtendedAircraftRow) {
+    setDeleteConfirm({
+      aircraftId: row.aircraft_id,
+      title: "Delete aircraft?",
+      message: `Delete aircraft #${row.aircraft_id} (${row.model})? This cannot be undone.`,
+      confirmLabel: "Delete aircraft",
+      cancelLabel: "Keep aircraft",
+      pendingLabel: "Deleting…",
+      tone: "danger"
+    });
+  }
+
+  async function confirmDelete() {
+    if (!deleteConfirm) return;
+    setIsDeleting(true);
+    try {
+      await deleteJson("/api/staff/master/aircraft/delete", { aircraft_id: deleteConfirm.aircraftId });
+      if (selectedKey === String(deleteConfirm.aircraftId)) startNew();
+      setDeleteConfirm(null);
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageTitle
@@ -197,6 +224,14 @@ export default function AircraftMasterPage() {
 
       {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
       <StaffAlertModal alert={alert} onClose={clearAlert} />
+      <StaffConfirmModal
+        confirm={deleteConfirm}
+        isPending={isDeleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!isDeleting) setDeleteConfirm(null);
+        }}
+      />
 
       <div className="grid gap-6">
         <form onSubmit={handleSubmit} className={formCardClass}>
@@ -307,6 +342,7 @@ export default function AircraftMasterPage() {
               rowKey={(row) => String(row.aircraft_id)}
               selectedKey={selectedKey}
               onSelect={editRow}
+              onDelete={requestDelete}
               columns={[
                 { key: "aircraft_id", label: "ID" },
                 { key: "airline_id", label: "Airline" },

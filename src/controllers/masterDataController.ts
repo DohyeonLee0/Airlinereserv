@@ -418,6 +418,31 @@ export async function upsertAircraft(request: NextRequest) {
   }
 }
 
+export async function deleteAircraft(request: NextRequest) {
+  const session = await requireStaffSession();
+  if (session.error) return session.error;
+  const body = await readJson(request);
+  if (!body.aircraft_id) return badRequest("Missing field(s): aircraft_id");
+  try {
+    await callProcedure("CALL delete_aircraft(?)", [Number(body.aircraft_id)]);
+    return ok({ deleted: body.aircraft_id });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    const dbError = error as { errno?: number; code?: string };
+    if (
+      dbError.errno === 1451 ||
+      dbError.code === "ER_ROW_IS_REFERENCED_2" ||
+      /foreign key constraint|Cannot delete or update a parent row/i.test(message)
+    ) {
+      return conflict(
+        "This aircraft cannot be deleted because it is already used on generated flights.",
+        "AIRCRAFT_IN_USE"
+      );
+    }
+    return serverError(error);
+  }
+}
+
 export async function listSchedules() {
   const session = await requireStaffSession();
   if (session.error) return session.error;

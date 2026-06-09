@@ -9,6 +9,7 @@ export type StaffConfirmState = {
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  pendingLabel?: string;
   tone?: "danger" | "warning";
 };
 
@@ -100,7 +101,7 @@ export function StaffConfirmModal({ confirm, isPending = false, onConfirm, onCan
               confirmButtonClass
             )}
           >
-            {isPending ? "Deleting…" : (confirm.confirmLabel ?? "Delete")}
+            {isPending ? (confirm.pendingLabel ?? "Deleting…") : (confirm.confirmLabel ?? "Delete")}
           </button>
         </div>
       </div>

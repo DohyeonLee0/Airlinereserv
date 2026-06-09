@@ -6,6 +6,7 @@ import { PageTitle } from "@/app/components/dashboard/PageTitle";
 import { masterInputClass, MasterFormField } from "@/app/components/dashboard/master/MasterFormField";
 import MasterRecordTable from "@/app/components/dashboard/master/MasterRecordTable";
 import { useMasterLists, type AirportRow } from "@/app/components/dashboard/master/useMasterLists";
+import { StaffConfirmModal, type StaffConfirmState } from "@/app/components/dashboard/StaffConfirmModal";
 import { StaffAlertModal, useStaffAction } from "@/app/components/dashboard/useStaffAction";
 import { COUNTRY_OPTIONS } from "@/lib/masterDataOptions";
 
@@ -15,6 +16,8 @@ export default function AirportsMasterPage() {
   const { airports, countryOptions, loading, error, reload } = useMasterLists({ airports: true });
   const { alert, clearAlert, postJson, deleteJson } = useStaffAction(reload);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<(StaffConfirmState & { airportCode: string }) | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [form, setForm] = useState({ airport_code: "", airport_name: "", city: "", country: "" });
 
   const countries = useMemo(
@@ -54,10 +57,28 @@ export default function AirportsMasterPage() {
     if (result.ok) startNew();
   }
 
-  async function handleDelete(row: AirportRow) {
-    if (!confirm(`Delete airport ${row.airport_code}?`)) return;
-    await deleteJson("/api/staff/master/airports/delete", { airport_code: row.airport_code });
-    if (selectedKey === row.airport_code) startNew();
+  function requestDelete(row: AirportRow) {
+    setDeleteConfirm({
+      airportCode: row.airport_code,
+      title: "Delete airport?",
+      message: `Delete airport ${row.airport_code}? This cannot be undone.`,
+      confirmLabel: "Delete airport",
+      cancelLabel: "Keep airport",
+      pendingLabel: "Deleting…",
+      tone: "danger"
+    });
+  }
+
+  async function confirmDelete() {
+    if (!deleteConfirm) return;
+    setIsDeleting(true);
+    try {
+      await deleteJson("/api/staff/master/airports/delete", { airport_code: deleteConfirm.airportCode });
+      if (selectedKey === deleteConfirm.airportCode) startNew();
+      setDeleteConfirm(null);
+    } finally {
+      setIsDeleting(false);
+    }
   }
 
   return (
@@ -71,6 +92,14 @@ export default function AirportsMasterPage() {
 
       {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
       <StaffAlertModal alert={alert} onClose={clearAlert} />
+      <StaffConfirmModal
+        confirm={deleteConfirm}
+        isPending={isDeleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!isDeleting) setDeleteConfirm(null);
+        }}
+      />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,380px)_1fr]">
         <form onSubmit={handleSubmit} className={formCardClass}>
@@ -156,7 +185,7 @@ export default function AirportsMasterPage() {
               rowKey={(row) => row.airport_code}
               selectedKey={selectedKey}
               onSelect={editRow}
-              onDelete={handleDelete}
+              onDelete={requestDelete}
               columns={[
                 { key: "airport_code", label: "Code" },
                 { key: "airport_name", label: "Name" },

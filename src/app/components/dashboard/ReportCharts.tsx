@@ -13,7 +13,9 @@ import {
   YAxis
 } from "recharts";
 import {
+  buildFlightChartPoint,
   ChartPanel,
+  ChartTooltip,
   LoadFactorChart,
   MonthlyRevenueChart,
   SeatClassChart,
@@ -38,52 +40,6 @@ function formatMonthLabel(month: string) {
   const date = new Date(Number(year), Number(mon) - 1, 1);
   if (Number.isNaN(date.getTime())) return month;
   return date.toLocaleDateString("en-US", { month: "short", year: "numeric" });
-}
-
-function MoneyTooltip({
-  active,
-  payload,
-  label,
-  valueLabel = "Value"
-}: {
-  active?: boolean;
-  payload?: Array<{ value?: number; name?: string }>;
-  label?: string;
-  valueLabel?: string;
-}) {
-  if (!active || !payload?.length) return null;
-  const value = Number(payload[0]?.value ?? 0);
-  return (
-    <div className="rounded-xl border border-zinc-200/80 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
-      {label ? <p className="mb-1 text-xs font-medium text-zinc-500">{label}</p> : null}
-      <p className="text-xs text-zinc-600">
-        {valueLabel}: <span className="font-semibold text-zinc-900">{formatCurrency(value)}</span>
-      </p>
-    </div>
-  );
-}
-
-function CountTooltip({
-  active,
-  payload,
-  label,
-  valueLabel = "Tickets"
-}: {
-  active?: boolean;
-  payload?: Array<{ value?: number }>;
-  label?: string;
-  valueLabel?: string;
-}) {
-  if (!active || !payload?.length) return null;
-  const value = Number(payload[0]?.value ?? 0);
-  return (
-    <div className="rounded-xl border border-zinc-200/80 bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
-      {label ? <p className="mb-1 text-xs font-medium text-zinc-500">{label}</p> : null}
-      <p className="text-xs text-zinc-600">
-        {valueLabel}: <span className="font-semibold text-zinc-900">{value.toLocaleString("en-US")}</span>
-      </p>
-    </div>
-  );
 }
 
 function aggregateMonthly(rows: Record<string, unknown>[]) {
@@ -116,24 +72,34 @@ function aggregateQuarterly(rows: Record<string, unknown>[]) {
 
 function topFlightRevenue(rows: Record<string, unknown>[], limit = 12) {
   return [...rows]
-    .map((row) => ({
-      route: `${row.flight_number ?? "—"} · ${row.dep_airport ?? "?"}→${row.arr_airport ?? "?"}`,
-      revenue: Number(row.total_revenue ?? 0),
-      tickets: Number(row.tickets_sold ?? 0)
-    }))
+    .map((row) => {
+      const flight = buildFlightChartPoint(row);
+      return {
+        route: flight.route,
+        routeDetail: flight.routeDetail,
+        flightDate: flight.flightDate,
+        revenue: Number(row.total_revenue ?? 0),
+        tickets: Number(row.tickets_sold ?? 0)
+      };
+    })
     .sort((a, b) => b.revenue - a.revenue)
     .slice(0, limit);
 }
 
 function loadFactorPoints(rows: Record<string, unknown>[], limit = 14) {
   return [...rows]
-    .map((row) => ({
-      label: `${row.flight_number ?? "—"} (${row.dep_airport ?? "?"}→${row.arr_airport ?? "?"})`,
-      loadFactor: Number(row.load_factor_percent ?? 0),
-      revenue: Number(row.total_revenue ?? 0),
-      soldSeats: Number(row.sold_seats ?? 0),
-      totalSeats: Number(row.total_seats ?? 0)
-    }))
+    .map((row) => {
+      const flight = buildFlightChartPoint(row);
+      return {
+        label: flight.label,
+        routeDetail: flight.routeDetail,
+        flightDate: flight.flightDate,
+        loadFactor: Number(row.load_factor_percent ?? 0),
+        revenue: Number(row.total_revenue ?? 0),
+        soldSeats: Number(row.sold_seats ?? 0),
+        totalSeats: Number(row.total_seats ?? 0)
+      };
+    })
     .sort((a, b) => b.loadFactor - a.loadFactor)
     .slice(0, limit);
 }
@@ -168,7 +134,15 @@ function MonthlyTicketsChart({ data }: { data: Array<{ month: string; tickets: n
         <CartesianGrid strokeDasharray="3 3" stroke="#e4e4e7" vertical={false} />
         <XAxis dataKey="monthLabel" tick={{ fontSize: 11, fill: "#71717a" }} tickLine={false} axisLine={{ stroke: "#e4e4e7" }} />
         <YAxis tick={{ fontSize: 11, fill: "#71717a" }} tickLine={false} axisLine={false} width={40} />
-        <Tooltip content={<CountTooltip valueLabel="Tickets sold" />} />
+        <Tooltip
+          shared={false}
+          content={(props) => (
+            <ChartTooltip
+              {...props}
+              valueFormatter={(v) => [v.toLocaleString("en-US"), "Tickets sold"]}
+            />
+          )}
+        />
         <Line
           type="monotone"
           dataKey="tickets"
@@ -196,7 +170,12 @@ function QuarterlyRevenueChart({ data }: { data: Array<{ label: string; revenue:
           tickFormatter={(v) => `$${v / 1000}k`}
           width={48}
         />
-        <Tooltip content={<MoneyTooltip valueLabel="Revenue" />} />
+        <Tooltip
+          shared={false}
+          content={(props) => (
+            <ChartTooltip {...props} valueFormatter={(v) => [formatCurrency(v), "Revenue"]} />
+          )}
+        />
         <Bar dataKey="revenue" name="Revenue" fill="#0770e3" radius={[6, 6, 0, 0]} maxBarSize={48} />
       </BarChart>
     </ResponsiveContainer>
@@ -212,12 +191,20 @@ function FlightTicketsChart({ data }: { data: Array<{ route: string; tickets: nu
         <YAxis
           type="category"
           dataKey="route"
-          width={112}
+          width={128}
           tick={{ fontSize: 10, fill: "#52525b" }}
           tickLine={false}
           axisLine={false}
         />
-        <Tooltip content={<CountTooltip valueLabel="Tickets sold" />} />
+        <Tooltip
+          shared={false}
+          content={(props) => (
+            <ChartTooltip
+              {...props}
+              valueFormatter={(v) => [v.toLocaleString("en-US"), "Tickets sold"]}
+            />
+          )}
+        />
         <Bar dataKey="tickets" name="Tickets sold" fill="#38bdf8" radius={[0, 4, 4, 0]} maxBarSize={24} />
       </BarChart>
     </ResponsiveContainer>

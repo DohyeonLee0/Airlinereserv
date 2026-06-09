@@ -161,6 +161,7 @@ DROP PROCEDURE IF EXISTS delete_airline;
 DROP PROCEDURE IF EXISTS upsert_airport;
 DROP PROCEDURE IF EXISTS delete_airport;
 DROP PROCEDURE IF EXISTS upsert_aircraft;
+DROP PROCEDURE IF EXISTS delete_aircraft;
 DROP PROCEDURE IF EXISTS replace_aircraft_seats;
 DROP PROCEDURE IF EXISTS upsert_aircraft_seat_template;
 DROP PROCEDURE IF EXISTS delete_aircraft_seat_template;
@@ -2653,6 +2654,14 @@ BEGIN
         airline_id = VALUES(airline_id),
         model = VALUES(model),
         capacity = VALUES(capacity);
+END //
+
+CREATE PROCEDURE delete_aircraft (
+    IN p_aircraft_id INT
+)
+BEGIN
+    DELETE FROM aircraft_seats WHERE aircraft_id = p_aircraft_id;
+    DELETE FROM aircraft WHERE aircraft_id = p_aircraft_id;
 END //
 
 CREATE PROCEDURE replace_aircraft_seats (

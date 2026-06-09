@@ -42,12 +42,27 @@ type OverviewData = {
   loadFactorTop: Array<{ label: string; loadFactor: number; revenue: number; soldSeats: number; totalSeats: number }>;
 };
 
+function currentMonthKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function priorMonthKey(monthKey: string) {
+  const [year, month] = monthKey.split("-").map(Number);
+  const prior = new Date(year, month - 2, 1);
+  return currentMonthKey(prior);
+}
+
 function revenueTrend(monthly: OverviewData["monthlyRevenue"]) {
-  if (monthly.length < 2) return undefined;
-  const sorted = [...monthly].sort((a, b) => a.month.localeCompare(b.month));
-  const latest = sorted[sorted.length - 1];
-  const previous = sorted[sorted.length - 2];
-  if (!previous.revenue) return undefined;
+  if (!monthly.length) return undefined;
+
+  const byMonth = new Map(monthly.map((row) => [row.month, row]));
+  const currentMonth = currentMonthKey();
+  const previousMonth = priorMonthKey(currentMonth);
+  const latest = byMonth.get(currentMonth);
+  const previous = byMonth.get(previousMonth);
+
+  if (!latest || !previous || !previous.revenue) return undefined;
+
   const change = ((latest.revenue - previous.revenue) / previous.revenue) * 100;
   const positive = change >= 0;
   return {
@@ -139,7 +154,7 @@ export default function DashboardOverviewPage() {
       <section className="grid gap-4 lg:grid-cols-3">
         <StatCard
           size="hero"
-          label="Total Revenue"
+          label="Total Revenue (2026)"
           value={`$${Number(kpis.total_revenue).toLocaleString("en-US")}`}
           hint="Confirmed ticket seat prices"
           icon={DollarSign}
