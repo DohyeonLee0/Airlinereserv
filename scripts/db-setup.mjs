@@ -24,16 +24,88 @@ const connectionConfig = {
   multipleStatements: true
 };
 
-function mysqlPathForSource(fileName) {
+function mysqlPathForSource(fileName, viaDocker = false) {
+  if (viaDocker) {
+    return `/tmp/${fileName}`;
+  }
   return path.join(root, fileName).replaceAll("\\", "/");
 }
 
 function findMysqlCli() {
   for (const candidate of mysqlExeCandidates) {
     const result = spawnSync(candidate, ["--version"], { encoding: "utf8", shell: false });
-    if (result.status === 0) return candidate;
+    if (result.status === 0) return { type: "host", command: candidate };
   }
+
+  const dockerContainer = process.env.DOCKER_DB_CONTAINER ?? "ars-mariadb";
+  const dockerCheck = spawnSync("docker", ["inspect", dockerContainer], {
+    encoding: "utf8",
+    shell: false
+  });
+  if (dockerCheck.status === 0) {
+    return { type: "docker", container: dockerContainer };
+  }
+
   return null;
+}
+
+function runMysqlCli(mysqlCli, initSql, tempPath) {
+  fs.writeFileSync(tempPath, initSql, "utf8");
+
+  if (mysqlCli.type === "docker") {
+    const containerInitPath = "/tmp/.db-init.sql";
+    const copyResult = spawnSync(
+      "docker",
+      ["cp", tempPath, `${mysqlCli.container}:${containerInitPath}`],
+      { encoding: "utf8", shell: false }
+    );
+    if (copyResult.status !== 0) {
+      throw new Error(copyResult.stderr || copyResult.stdout || "Failed to copy init SQL into Docker container.");
+    }
+
+    const result = spawnSync(
+      "docker",
+      [
+        "exec",
+        "-e",
+        `MYSQL_PWD=${connectionConfig.password}`,
+        mysqlCli.container,
+        "mariadb",
+        `-u${connectionConfig.user}`,
+        "--default-character-set=utf8mb4",
+        `--execute=SOURCE ${containerInitPath};`
+      ],
+      { encoding: "utf8", shell: false }
+    );
+
+    spawnSync("docker", ["exec", mysqlCli.container, "rm", "-f", containerInitPath], {
+      encoding: "utf8",
+      shell: false
+    });
+
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout || "Docker MariaDB CLI exited with a non-zero status.");
+    }
+    return;
+  }
+
+  const args = [
+    `--host=${connectionConfig.host}`,
+    `--port=${connectionConfig.port}`,
+    `--user=${connectionConfig.user}`,
+    "--default-character-set=utf8mb4",
+    `--execute=SOURCE ${tempPath.replaceAll("\\", "/")};`
+  ];
+
+  const result = spawnSync(mysqlCli.command, args, {
+    encoding: "utf8",
+    env: { ...process.env, MYSQL_PWD: connectionConfig.password },
+    shell: false
+  });
+
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || "MariaDB CLI exited with a non-zero status.");
+  }
 }
 
 function formatSqlTimestamp(value) {
@@ -146,39 +218,42 @@ async function seedDemoDistribution(connection) {
 try {
   const mysqlCli = findMysqlCli();
   if (!mysqlCli) {
-    throw new Error("mysql/mariadb CLI was not found. Set MYSQL_CLI to the full path of mysql.exe.");
+    throw new Error(
+      "mysql/mariadb CLI was not found. Set MYSQL_CLI, start the ars-mariadb container, or install MariaDB client."
+    );
   }
 
+  const viaDocker = mysqlCli.type === "docker";
   const initSql = [
     `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
     `USE \`${dbName}\`;`,
-    `SOURCE ${mysqlPathForSource("schema.sql")};`,
-    `SOURCE ${mysqlPathForSource("sample_data.sql")};`,
-    `SOURCE ${mysqlPathForSource("operations.sql")};`
+    ...(viaDocker
+      ? ["SET FOREIGN_KEY_CHECKS=0;"]
+      : []),
+    `SOURCE ${mysqlPathForSource("schema.sql", viaDocker)};`,
+    `SOURCE ${mysqlPathForSource("sample_data.sql", viaDocker)};`,
+    `SOURCE ${mysqlPathForSource("operations.sql", viaDocker)};`,
+    ...(viaDocker
+      ? ["SET FOREIGN_KEY_CHECKS=1;"]
+      : [])
   ].join("\n");
 
   const tempPath = path.join(root, ".db-init.sql");
-  fs.writeFileSync(tempPath, initSql, "utf8");
-
-  const args = [
-    `--host=${connectionConfig.host}`,
-    `--port=${connectionConfig.port}`,
-    `--user=${connectionConfig.user}`,
-    "--default-character-set=utf8mb4",
-    `--execute=SOURCE ${tempPath.replaceAll("\\", "/")};`
-  ];
-
-  const result = spawnSync(mysqlCli, args, {
-    encoding: "utf8",
-    env: { ...process.env, MYSQL_PWD: connectionConfig.password },
-    shell: false
-  });
-
-  fs.rmSync(tempPath, { force: true });
-
-  if (result.status !== 0) {
-    throw new Error(result.stderr || result.stdout || "MariaDB CLI exited with a non-zero status.");
+  if (viaDocker) {
+    for (const fileName of ["schema.sql", "sample_data.sql", "operations.sql"]) {
+      const copyResult = spawnSync(
+        "docker",
+        ["cp", path.join(root, fileName), `${mysqlCli.container}:/tmp/${fileName}`],
+        { encoding: "utf8", shell: false }
+      );
+      if (copyResult.status !== 0) {
+        throw new Error(copyResult.stderr || copyResult.stdout || `Failed to copy ${fileName} into Docker container.`);
+      }
+    }
   }
+
+  runMysqlCli(mysqlCli, initSql, tempPath);
+  fs.rmSync(tempPath, { force: true });
 
   const connection = await mysql.createConnection(connectionConfig);
   const { seedSeatTemplates } = await import("./seed-seat-templates.mjs");
