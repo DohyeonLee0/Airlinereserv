@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import { callProcedure, getPool } from "@/config/db";
 import { getSessionUser } from "@/lib/auth";
@@ -26,12 +26,31 @@ export async function upsertAirline(request: NextRequest) {
   const missing = ["airline_id", "airline_name"].filter((k) => !body[k]);
   if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
   try {
+    const airlineId = String(body.airline_id);
+    const [existing] = await getPool().query<RowDataPacket[]>(
+      "SELECT airline_id FROM airlines WHERE airline_id = ?",
+      [airlineId]
+    );
     await callProcedure("CALL upsert_airline(?, ?, ?)", [
-      String(body.airline_id),
+      airlineId,
       String(body.airline_name),
       body.country ? String(body.country) : null
     ]);
-    return created({ airline_id: body.airline_id });
+    if (existing.length) {
+      return NextResponse.json({
+        success: true,
+        data: { airline_id: airlineId, updated: true },
+        message: "Airline updated."
+      });
+    }
+    return NextResponse.json(
+      {
+        success: true,
+        data: { airline_id: airlineId, updated: false },
+        message: "Airline created."
+      },
+      { status: 201 }
+    );
   } catch (error) {
     return serverError(error);
   }
@@ -207,19 +226,21 @@ export async function listSchedules() {
        al.airline_name,
        COALESCE(gen.generated_flight_count, 0) AS generated_flight_count,
        COALESCE(
-         (
-           SELECT JSON_ARRAYAGG(ordered.day_of_week)
-           FROM (
-             SELECT sd.day_of_week
-             FROM schedule_days sd
-             WHERE sd.schedule_id = fs.schedule_id
-             ORDER BY FIELD(sd.day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
-           ) ordered
-         ),
+         sd.operating_days,
          JSON_ARRAY('MON', 'WED', 'FRI')
        ) AS operating_days
      FROM flight_schedules fs
      JOIN airlines al ON fs.airline_id = al.airline_id
+     LEFT JOIN (
+       SELECT
+         schedule_id,
+         JSON_ARRAYAGG(
+           day_of_week
+           ORDER BY FIELD(day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
+         ) AS operating_days
+       FROM schedule_days
+       GROUP BY schedule_id
+     ) sd ON sd.schedule_id = fs.schedule_id
      LEFT JOIN (
        SELECT schedule_id, COUNT(*) AS generated_flight_count
        FROM flights
@@ -268,21 +289,25 @@ export async function listConnectingItineraries() {
        sl.leg_summary,
        i.leg_schedule_ids,
        COALESCE(
-         (
-           SELECT JSON_ARRAYAGG(ordered.day_of_week)
-           FROM (
-             SELECT sd.day_of_week
-             FROM schedule_days sd
-             WHERE sd.schedule_id = CAST(
-               JSON_UNQUOTE(JSON_EXTRACT(i.leg_schedule_ids, '$[0]'))
-               AS UNSIGNED
-             )
-             ORDER BY FIELD(sd.day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
-           ) ordered
-         ),
+         od.operating_days,
          JSON_ARRAY('MON', 'WED', 'FRI')
        ) AS operating_days
      FROM itineraries i
+     LEFT JOIN (
+       SELECT
+         i2.itinerary_id,
+         JSON_ARRAYAGG(
+           sd.day_of_week
+           ORDER BY FIELD(sd.day_of_week, 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
+         ) AS operating_days
+       FROM itineraries i2
+       INNER JOIN schedule_days sd ON sd.schedule_id = CAST(
+         JSON_UNQUOTE(JSON_EXTRACT(i2.leg_schedule_ids, '$[0]'))
+         AS UNSIGNED
+       )
+       WHERE i2.leg_schedule_ids IS NOT NULL
+       GROUP BY i2.itinerary_id
+     ) od ON od.itinerary_id = i.itinerary_id
      LEFT JOIN (
        SELECT
          i2.itinerary_id,

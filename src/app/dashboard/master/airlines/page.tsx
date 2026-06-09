@@ -42,12 +42,13 @@ export default function AirlinesMasterPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await postJson("/api/staff/master/airlines", {
-      airline_id: form.airline_id.trim().toUpperCase(),
+    const airlineId = (selectedKey ?? form.airline_id).trim().toUpperCase();
+    const result = await postJson("/api/staff/master/airlines", {
+      airline_id: airlineId,
       airline_name: form.airline_name.trim(),
       country: form.country || null
     });
-    startNew();
+    if (result.ok) startNew();
   }
 
   async function handleDelete(row: AirlineRow) {
@@ -80,13 +81,18 @@ export default function AirlinesMasterPage() {
           </div>
 
           <div className="space-y-4">
-            <MasterFormField label="Airline code" hint="2-letter IATA code, e.g. KE" required>
+            <MasterFormField
+              label="Airline code"
+              hint={selectedKey ? "Code cannot be changed while editing." : "2-letter IATA code, e.g. KE"}
+              required
+            >
               <input
                 value={form.airline_id}
                 onChange={(e) => setForm((p) => ({ ...p, airline_id: e.target.value.toUpperCase() }))}
                 maxLength={10}
                 placeholder="KE"
                 className={masterInputClass}
+                readOnly={Boolean(selectedKey)}
                 required
               />
             </MasterFormField>
