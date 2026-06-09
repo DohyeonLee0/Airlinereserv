@@ -34,33 +34,14 @@ export default function FlightSearchWidget({
   onSubmit,
   onSwapAirports
 }: FlightSearchWidgetProps) {
-  const isRoundTrip = form.journey_type === "round_trip";
-
   return (
     <div className="rounded-2xl border border-zinc-100 bg-white p-5 shadow-[0_8px_30px_rgba(0,0,0,0.06)] sm:p-6">
-      <h2 className="text-lg font-semibold tracking-tight text-zinc-900">Search flights</h2>
+      <h2 className="text-lg font-semibold tracking-tight text-zinc-900">Search</h2>
 
       <div className="mt-4 flex flex-wrap gap-2">
-        {(
-          [
-            ["one_way", "One-way"],
-            ["round_trip", "Round-trip"]
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => onFormChange({ journey_type: key })}
-            className={cn(
-              "rounded-full px-4 py-2 text-sm font-semibold transition",
-              form.journey_type === key
-                ? "bg-deep-space-blue text-white shadow-sm"
-                : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
-            )}
-          >
-            {label}
-          </button>
-        ))}
+        <span className="rounded-full bg-deep-space-blue px-4 py-2 text-sm font-semibold text-white shadow-sm">
+          Flights
+        </span>
       </div>
 
       <form onSubmit={onSubmit} className="mt-5">
@@ -97,12 +78,7 @@ export default function FlightSearchWidget({
           </label>
         </div>
 
-        <div
-          className={cn(
-            "mt-4 grid gap-4",
-            isRoundTrip ? "sm:grid-cols-2 lg:grid-cols-5" : "sm:grid-cols-2 lg:grid-cols-4"
-          )}
-        >
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block text-sm font-medium text-zinc-700">
             Departure date
             <input
@@ -114,21 +90,6 @@ export default function FlightSearchWidget({
               className="mt-1.5 w-full rounded-xl border border-zinc-200 px-3 py-2.5 outline-none focus:border-cerulean-500"
             />
           </label>
-
-          {isRoundTrip ? (
-            <label className="block text-sm font-medium text-zinc-700">
-              Return date
-              <input
-                type="date"
-                lang="en-US"
-                value={form.return_date}
-                min={form.flight_date}
-                onChange={(e) => onFormChange({ return_date: e.target.value })}
-                required
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 px-3 py-2.5 outline-none focus:border-cerulean-500"
-              />
-            </label>
-          ) : null}
 
           <label className="block text-sm font-medium text-zinc-700">
             Cabin (optional)
@@ -175,7 +136,7 @@ export default function FlightSearchWidget({
         </div>
 
         <Button type="submit" disabled={loading} size="lg" className="mt-4 w-full sm:w-auto">
-          {loading ? "Searching…" : "Search flights"}
+          {loading ? "Searching…" : "Search"}
         </Button>
       </form>
     </div>
