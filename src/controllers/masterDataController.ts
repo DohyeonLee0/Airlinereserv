@@ -12,6 +12,125 @@ async function requireStaffSession() {
   return { error: null, user };
 }
 
+async function renameAirlineCode(
+  oldId: string,
+  newId: string,
+  airlineName: string,
+  country: string | null
+) {
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [original] = await connection.query<RowDataPacket[]>(
+      "SELECT airline_id FROM airlines WHERE airline_id = ?",
+      [oldId]
+    );
+    if (!original.length) {
+      await connection.rollback();
+      return { error: badRequest(`Airline ${oldId} was not found.`) };
+    }
+
+    if (oldId !== newId) {
+      const [duplicate] = await connection.query<RowDataPacket[]>(
+        "SELECT airline_id FROM airlines WHERE airline_id = ?",
+        [newId]
+      );
+      if (duplicate.length) {
+        await connection.rollback();
+        return { error: conflict(`Airline code ${newId} is already in use.`, "DUPLICATE_AIRLINE_CODE") };
+      }
+
+      await connection.query("SET FOREIGN_KEY_CHECKS=0");
+      await connection.query("UPDATE aircraft SET airline_id = ? WHERE airline_id = ?", [newId, oldId]);
+      await connection.query("UPDATE flight_schedules SET airline_id = ? WHERE airline_id = ?", [newId, oldId]);
+      await connection.query(
+        "UPDATE airlines SET airline_id = ?, airline_name = ?, country = ? WHERE airline_id = ?",
+        [newId, airlineName, country, oldId]
+      );
+      await connection.query("SET FOREIGN_KEY_CHECKS=1");
+    } else {
+      await connection.query(
+        "UPDATE airlines SET airline_name = ?, country = ? WHERE airline_id = ?",
+        [airlineName, country, oldId]
+      );
+    }
+
+    await connection.commit();
+    return { error: null, airlineId: newId, renamed: oldId !== newId };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function renameAirportCode(
+  oldCode: string,
+  newCode: string,
+  airportName: string,
+  city: string,
+  country: string
+) {
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [original] = await connection.query<RowDataPacket[]>(
+      "SELECT airport_code FROM airports WHERE airport_code = ?",
+      [oldCode]
+    );
+    if (!original.length) {
+      await connection.rollback();
+      return { error: badRequest(`Airport ${oldCode} was not found.`) };
+    }
+
+    if (oldCode !== newCode) {
+      const [duplicate] = await connection.query<RowDataPacket[]>(
+        "SELECT airport_code FROM airports WHERE airport_code = ?",
+        [newCode]
+      );
+      if (duplicate.length) {
+        await connection.rollback();
+        return { error: conflict(`Airport code ${newCode} is already in use.`, "DUPLICATE_AIRPORT_CODE") };
+      }
+
+      await connection.query("SET FOREIGN_KEY_CHECKS=0");
+      await connection.query("UPDATE flight_schedules SET dep_airport = ? WHERE dep_airport = ?", [newCode, oldCode]);
+      await connection.query("UPDATE flight_schedules SET arr_airport = ? WHERE arr_airport = ?", [newCode, oldCode]);
+      await connection.query(
+        "UPDATE itineraries SET departure_airport_code = ? WHERE departure_airport_code = ?",
+        [newCode, oldCode]
+      );
+      await connection.query(
+        "UPDATE itineraries SET arrival_airport_code = ? WHERE arrival_airport_code = ?",
+        [newCode, oldCode]
+      );
+      await connection.query("UPDATE promotions SET dep_airport = ? WHERE dep_airport = ?", [newCode, oldCode]);
+      await connection.query("UPDATE promotions SET arr_airport = ? WHERE arr_airport = ?", [newCode, oldCode]);
+      await connection.query(
+        "UPDATE airports SET airport_code = ?, airport_name = ?, city = ?, country = ? WHERE airport_code = ?",
+        [newCode, airportName, city, country, oldCode]
+      );
+      await connection.query("SET FOREIGN_KEY_CHECKS=1");
+    } else {
+      await connection.query(
+        "UPDATE airports SET airport_name = ?, city = ?, country = ? WHERE airport_code = ?",
+        [airportName, city, country, oldCode]
+      );
+    }
+
+    await connection.commit();
+    return { error: null, airportCode: newCode, renamed: oldCode !== newCode };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 export async function listAirlines() {
   const session = await requireStaffSession();
   if (session.error) return session.error;
@@ -26,16 +145,30 @@ export async function upsertAirline(request: NextRequest) {
   const missing = ["airline_id", "airline_name"].filter((k) => !body[k]);
   if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
   try {
-    const airlineId = String(body.airline_id);
+    const airlineId = String(body.airline_id).trim().toUpperCase();
+    const originalAirlineId = body.original_airline_id
+      ? String(body.original_airline_id).trim().toUpperCase()
+      : null;
+    const airlineName = String(body.airline_name);
+    const country = body.country ? String(body.country) : null;
+
+    if (originalAirlineId) {
+      const result = await renameAirlineCode(originalAirlineId, airlineId, airlineName, country);
+      if (result.error) return result.error;
+      return NextResponse.json({
+        success: true,
+        data: { airline_id: result.airlineId, updated: true, renamed: result.renamed },
+        message: result.renamed
+          ? "Airline code renamed. Linked aircraft and schedules were updated."
+          : "Airline updated."
+      });
+    }
+
     const [existing] = await getPool().query<RowDataPacket[]>(
       "SELECT airline_id FROM airlines WHERE airline_id = ?",
       [airlineId]
     );
-    await callProcedure("CALL upsert_airline(?, ?, ?)", [
-      airlineId,
-      String(body.airline_name),
-      body.country ? String(body.country) : null
-    ]);
+    await callProcedure("CALL upsert_airline(?, ?, ?)", [airlineId, airlineName, country]);
     if (existing.length) {
       return NextResponse.json({
         success: true,
@@ -65,6 +198,18 @@ export async function deleteAirline(request: NextRequest) {
     await callProcedure("CALL delete_airline(?)", [String(body.airline_id)]);
     return ok({ deleted: body.airline_id });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    const dbError = error as { errno?: number; code?: string };
+    if (
+      dbError.errno === 1451 ||
+      dbError.code === "ER_ROW_IS_REFERENCED_2" ||
+      /foreign key constraint|Cannot delete or update a parent row/i.test(message)
+    ) {
+      return conflict(
+        "This airline cannot be deleted because it is already in use.",
+        "AIRLINE_IN_USE"
+      );
+    }
     return serverError(error);
   }
 }
@@ -83,13 +228,57 @@ export async function upsertAirport(request: NextRequest) {
   const missing = ["airport_code", "airport_name", "city", "country"].filter((k) => !body[k]);
   if (missing.length) return badRequest(`Missing field(s): ${missing.join(", ")}`);
   try {
+    const airportCode = String(body.airport_code).trim().toUpperCase();
+    const originalAirportCode = body.original_airport_code
+      ? String(body.original_airport_code).trim().toUpperCase()
+      : null;
+    const airportName = String(body.airport_name);
+    const city = String(body.city);
+    const country = String(body.country);
+
+    if (originalAirportCode) {
+      const result = await renameAirportCode(
+        originalAirportCode,
+        airportCode,
+        airportName,
+        city,
+        country
+      );
+      if (result.error) return result.error;
+      return NextResponse.json({
+        success: true,
+        data: { airport_code: result.airportCode, updated: true, renamed: result.renamed },
+        message: result.renamed
+          ? "Airport code renamed. Linked schedules and routes were updated."
+          : "Airport updated."
+      });
+    }
+
+    const [existing] = await getPool().query<RowDataPacket[]>(
+      "SELECT airport_code FROM airports WHERE airport_code = ?",
+      [airportCode]
+    );
     await callProcedure("CALL upsert_airport(?, ?, ?, ?)", [
-      String(body.airport_code),
-      String(body.airport_name),
-      String(body.city),
-      String(body.country)
+      airportCode,
+      airportName,
+      city,
+      country
     ]);
-    return created({ airport_code: body.airport_code });
+    if (existing.length) {
+      return NextResponse.json({
+        success: true,
+        data: { airport_code: airportCode, updated: true },
+        message: "Airport updated."
+      });
+    }
+    return NextResponse.json(
+      {
+        success: true,
+        data: { airport_code: airportCode, updated: false },
+        message: "Airport created."
+      },
+      { status: 201 }
+    );
   } catch (error) {
     return serverError(error);
   }
@@ -104,6 +293,18 @@ export async function deleteAirport(request: NextRequest) {
     await callProcedure("CALL delete_airport(?)", [String(body.airport_code)]);
     return ok({ deleted: body.airport_code });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    const dbError = error as { errno?: number; code?: string };
+    if (
+      dbError.errno === 1451 ||
+      dbError.code === "ER_ROW_IS_REFERENCED_2" ||
+      /foreign key constraint|Cannot delete or update a parent row/i.test(message)
+    ) {
+      return conflict(
+        "This airport cannot be deleted because it is already in use.",
+        "AIRPORT_IN_USE"
+      );
+    }
     return serverError(error);
   }
 }

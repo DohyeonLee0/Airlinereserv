@@ -42,8 +42,9 @@ export default function AirlinesMasterPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const airlineId = (selectedKey ?? form.airline_id).trim().toUpperCase();
+    const airlineId = form.airline_id.trim().toUpperCase();
     const result = await postJson("/api/staff/master/airlines", {
+      ...(selectedKey ? { original_airline_id: selectedKey } : {}),
       airline_id: airlineId,
       airline_name: form.airline_name.trim(),
       country: form.country || null
@@ -83,7 +84,11 @@ export default function AirlinesMasterPage() {
           <div className="space-y-4">
             <MasterFormField
               label="Airline code"
-              hint={selectedKey ? "Code cannot be changed while editing." : "2-letter IATA code, e.g. KE"}
+              hint={
+                selectedKey
+                  ? "Changing the code also updates linked aircraft and schedules."
+                  : "2-letter IATA code, e.g. KE"
+              }
               required
             >
               <input
@@ -92,7 +97,6 @@ export default function AirlinesMasterPage() {
                 maxLength={10}
                 placeholder="KE"
                 className={masterInputClass}
-                readOnly={Boolean(selectedKey)}
                 required
               />
             </MasterFormField>

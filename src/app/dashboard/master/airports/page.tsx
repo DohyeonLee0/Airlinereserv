@@ -43,13 +43,15 @@ export default function AirportsMasterPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await postJson("/api/staff/master/airports", {
-      airport_code: form.airport_code.trim().toUpperCase(),
+    const airportCode = form.airport_code.trim().toUpperCase();
+    const result = await postJson("/api/staff/master/airports", {
+      ...(selectedKey ? { original_airport_code: selectedKey } : {}),
+      airport_code: airportCode,
       airport_name: form.airport_name.trim(),
       city: form.city.trim(),
       country: form.country
     });
-    startNew();
+    if (result.ok) startNew();
   }
 
   async function handleDelete(row: AirportRow) {
@@ -82,7 +84,15 @@ export default function AirportsMasterPage() {
           </div>
 
           <div className="space-y-4">
-            <MasterFormField label="Airport code" hint="3-letter IATA code" required>
+            <MasterFormField
+              label="Airport code"
+              hint={
+                selectedKey
+                  ? "Changing the code also updates linked schedules, routes, and promotions."
+                  : "3-letter IATA code"
+              }
+              required
+            >
               <input
                 value={form.airport_code}
                 onChange={(e) => setForm((p) => ({ ...p, airport_code: e.target.value.toUpperCase() }))}
